@@ -34,6 +34,7 @@ class MqttService : public SignalingService {
     std::string username_;
     std::string password_;
     struct mosquitto *connection_;
+    std::string lwt_topic_;
 
     std::unordered_map<std::string, std::string> client_id_to_peer_id_;
     std::unordered_map<std::string, std::string> peer_id_to_client_id_;
@@ -47,6 +48,8 @@ class MqttService : public SignalingService {
     void Subscribe(const std::string &topic);
     void Unsubscribe(const std::string &topic);
     void Publish(const std::string &topic, const std::string &msg);
+    void PublishRetain(const std::string &topic, const std::string &msg, int qos, bool retain);
+    void ConfigureLwt();
     void OnConnect(struct mosquitto *mosq, void *obj, int rc);
     void OnMessage(struct mosquitto *mosq, void *obj, const struct mosquitto_message *message);
     std::string FindClientId(const std::string &topic) const;

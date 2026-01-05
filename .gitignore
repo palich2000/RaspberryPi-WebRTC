@@ -18,3 +18,5 @@ proto
 
 # local config files
 config/*.local.yml
+
+.idea/

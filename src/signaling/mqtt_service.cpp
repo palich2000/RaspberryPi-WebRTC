@@ -11,6 +11,13 @@
 
 #include "common/logging.h"
 
+namespace {
+constexpr int kLwtQos = 1;
+constexpr bool kLwtRetain = true;
+constexpr const char *kOnlinePayload = "online";
+constexpr const char *kOfflinePayload = "offline";
+} // namespace
+
 std::shared_ptr<MqttService> MqttService::Create(Args args, std::shared_ptr<Conductor> conductor) {
     return std::make_shared<MqttService>(args, conductor);
 }
@@ -22,7 +29,9 @@ MqttService::MqttService(Args args, std::shared_ptr<Conductor> conductor)
       hostname_(args.mqtt_host),
       username_(args.mqtt_username),
       password_(args.mqtt_password),
-      connection_(nullptr) {}
+      connection_(nullptr) {
+    lwt_topic_ = uid_ + "/lwt";
+}
 
 MqttService::~MqttService() { Disconnect(); }
 
@@ -104,6 +113,8 @@ void MqttService::Disconnect() {
         return;
     }
 
+    PublishRetain(lwt_topic_, kOfflinePayload, kLwtQos, kLwtRetain);
+
     int rc = mosquitto_loop_stop(connection_, true);
     if (rc != MOSQ_ERR_SUCCESS) {
         ERROR_PRINT("mosquitto_loop_stop: %s", mosquitto_strerror(rc));
@@ -127,6 +138,31 @@ void MqttService::Publish(const std::string &topic, const std::string &msg) {
     if (rc != MOSQ_ERR_SUCCESS) {
         ERROR_PRINT("Error publishing: %s", mosquitto_strerror(rc));
     }
+}
+
+void MqttService::PublishRetain(const std::string &topic, const std::string &msg, int qos,
+                                bool retain) {
+    int rc = mosquitto_publish_v5(connection_, NULL, topic.c_str(), msg.length(), msg.c_str(), qos,
+                                  retain, nullptr);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        ERROR_PRINT("Error publishing retained message: %s", mosquitto_strerror(rc));
+    }
+}
+
+void MqttService::ConfigureLwt() {
+    // Must be called BEFORE connecting.
+    const std::string offline = kOfflinePayload;
+
+    int rc = mosquitto_will_set_v5(connection_, lwt_topic_.c_str(),
+                                   static_cast<int>(offline.size()), offline.c_str(), kLwtQos,
+                                   kLwtRetain, nullptr);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        ERROR_PRINT("Failed to set LWT: %s", mosquitto_strerror(rc));
+        return;
+    }
+
+    INFO_PRINT("LWT configured: topic=%s payload=%s (qos=%d retain=%d)", lwt_topic_.c_str(),
+               offline.c_str(), kLwtQos, static_cast<int>(kLwtRetain));
 }
 
 void MqttService::Subscribe(const std::string &topic) {
@@ -154,6 +190,7 @@ void MqttService::OnConnect(struct mosquitto *mosq, void *obj, int rc) {
         Subscribe(GetTopic(TopicType::Offer, "+"));
         Subscribe(GetTopic(TopicType::Answer, "+"));
         Subscribe(GetTopic(TopicType::Ice, "+"));
+        PublishRetain(lwt_topic_, kOnlinePayload, kLwtQos, kLwtRetain);
         INFO_PRINT("MQTT service is ready.");
     } else {
         ERROR_PRINT("MQTT connect failed: %s", mosquitto_strerror(rc));
@@ -321,6 +358,8 @@ void MqttService::Connect() {
         MqttService *service = static_cast<MqttService *>(obj);
         service->OnMessage(mosq, obj, message);
     });
+
+    ConfigureLwt();
 
     mosquitto_reconnect_delay_set(connection_, 2, 10, true);
 
