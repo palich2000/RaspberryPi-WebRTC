@@ -302,17 +302,29 @@ void Conductor::QueryFile(std::shared_ptr<RtcChannel> datachannel, const protoco
     if (type == protocol::QueryFileType::LATEST_FILE || parameter.empty()) {
         auto path = Utils::FindSecondNewestFile(args.record_path, ".mp4");
         DEBUG_PRINT("LATEST: %s", path.c_str());
-        SendFileResponse(datachannel, path);
+        if (path.empty()) {
+            datachannel->Send(protocol::QueryFileResponse{});
+        } else {
+            SendFileResponse(datachannel, path);
+        }
     } else if (type == protocol::QueryFileType::BEFORE_FILE) {
         auto paths = Utils::FindOlderFiles(parameter, 8);
-        for (auto &path : paths) {
-            DEBUG_PRINT("OLDER: %s", path.c_str());
-            SendFileResponse(datachannel, path);
+        if (paths.empty()) {
+            datachannel->Send(protocol::QueryFileResponse{});
+        } else {
+            for (auto &path : paths) {
+                DEBUG_PRINT("OLDER: %s", path.c_str());
+                SendFileResponse(datachannel, path);
+            }
         }
     } else if (type == protocol::QueryFileType::BEFORE_TIME) {
         auto path = Utils::FindFilesFromDatetime(args.record_path, parameter);
         DEBUG_PRINT("TIME_MATCH: %s", path.c_str());
-        SendFileResponse(datachannel, path);
+        if (path.empty()) {
+            datachannel->Send(protocol::QueryFileResponse{});
+        } else {
+            SendFileResponse(datachannel, path);
+        }
     }
 }
 
@@ -325,14 +337,9 @@ void Conductor::SendFileResponse(std::shared_ptr<RtcChannel> datachannel, const 
     file->set_filepath(path);
     file->set_duration_sec(Utils::GetVideoDuration(path));
 
-    auto last_dot = path.rfind('.');
-    if (last_dot != std::string::npos) {
-        std::string thumbnail_path = path.substr(0, last_dot) + ".jpg";
-
-        auto binary_data = Utils::ReadFileInBinary(thumbnail_path);
-        if (!binary_data.empty()) {
-            file->set_thumbnail("data:image/jpeg;base64," + Utils::ToBase64(binary_data));
-        }
+    std::string base64_data = Utils::GetVideoThumbnailBase64(path);
+    if (!base64_data.empty()) {
+        file->set_thumbnail("data:image/jpeg;base64," + base64_data);
     }
 
     datachannel->Send(resp);
@@ -352,7 +359,7 @@ void Conductor::TransferFile(std::shared_ptr<RtcChannel> datachannel, const prot
 
     try {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file) {
+        if (!file.is_open()) {
             ERROR_PRINT("Unable to open file: %s", path.c_str());
             return;
         }
