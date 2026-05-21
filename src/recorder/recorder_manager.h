@@ -1,7 +1,9 @@
 #ifndef RECORDER_MANAGER_H_
 #define RECORDER_MANAGER_H_
 
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -12,7 +14,6 @@ extern "C" {
 
 #include "capturer/audio_capturer.h"
 #include "capturer/video_capturer.h"
-#include "common/worker.h"
 #include "recorder/audio_recorder.h"
 #include "recorder/video_recorder.h"
 
@@ -26,10 +27,7 @@ class RecorderManager {
   public:
     static std::unique_ptr<RecorderManager> Create(std::shared_ptr<VideoCapturer> video_src,
                                                    std::shared_ptr<AudioCapturer> audio_src,
-                                                   Args config);
-    static std::shared_ptr<RecorderManager> CreateOnDemand(std::shared_ptr<VideoCapturer> video_src,
-                                                           std::shared_ptr<AudioCapturer> audio_src,
-                                                           Args config);
+                                                   Args config, bool auto_start = true);
     RecorderManager(Args config);
     ~RecorderManager();
     void WriteIntoFile(AVPacket *pkt);
@@ -61,7 +59,10 @@ class RecorderManager {
     std::atomic<bool> header_written_;
     std::atomic<bool> time_reset_pending_;
     std::mutex rotation_mtx_;
-    std::unique_ptr<Worker> worker_;
+    std::condition_variable rotation_cv_;
+    std::atomic<bool> rotation_abort_;
+    std::atomic<bool> rotation_requested_;
+    std::thread rotation_thread_;
     struct timeval last_created_time_;
     std::shared_ptr<VideoCapturer> video_src_;
 
@@ -70,6 +71,7 @@ class RecorderManager {
     Subscription audio_subscription_;
     Subscription video_subscription_;
 
+    void StartRotationThread();
     void MakePreviewImage(std::string path);
     std::string ReplaceExtension(const std::string &url, const std::string &new_extension);
 };
