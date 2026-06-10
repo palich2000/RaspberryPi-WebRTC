@@ -259,16 +259,19 @@ void overlay_clock_yuv422(uint8_t *img, int width, int height, int bytesperline,
     int neutral_uv = 1;
 
     int scale = 2; // увеличь до 3..4 если надо
-    int x = 150, y = 10;
+
+
 
     int pad = 10;
+    int bw = (11 * (8 + 1) + 8) * scale + 2 * pad; // 11 символов, каждый 8 пикс +1 пробел, +8 запас
+    int bh = 8 * scale + 2 * pad; // высота одного символа 8 пикс
+
+    int x = width/2 - bw/2, y = pad;
 
     int bx = x - pad;
     if (bx < 0) bx = 0;
     int by = y - pad;
     if (by < 0) by = 0;
-    int bw = (11 * (8 + 1) + 8) * scale + 2 * pad;
-    int bh = 8 * scale + 2 * pad;
 
     yuv422_fill_rect_black(img, width, height, bytesperline, bx, by, bw, bh, fmt);
     draw_text(img, width, height, bytesperline, x, y, fmt, txt, scale, Y_text, alpha, neutral_uv);

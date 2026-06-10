@@ -137,45 +137,45 @@ int V4L2Capturer::GetCameraIndex(webrtc::VideoCaptureModule::DeviceInfo *device_
 }
 
 static inline uint8_t clamp_u8(int v) {
-    if (v < 0) return 0;
-    if (v > 255) return 255;
+    if (v < 0)
+        return 0;
+    if (v > 255)
+        return 255;
     return (uint8_t)v;
 }
 
-static inline void rgb_to_yuv(uint8_t r, uint8_t g, uint8_t b,
-                              uint8_t *Y, uint8_t *U, uint8_t *V)
-{
-    int y = (  77*r + 150*g +  29*b) >> 8;           // ~0.299,0.587,0.114
-    int u = ((-43*r -  85*g + 128*b) >> 8) + 128;   // ~-0.169,-0.331,+0.5
-    int v = ((128*r - 107*g -  21*b) >> 8) + 128;   // ~+0.5,-0.419,-0.081
+static inline void rgb_to_yuv(uint8_t r, uint8_t g, uint8_t b, uint8_t *Y, uint8_t *U, uint8_t *V) {
+    int y = (77 * r + 150 * g + 29 * b) >> 8;          // ~0.299,0.587,0.114
+    int u = ((-43 * r - 85 * g + 128 * b) >> 8) + 128; // ~-0.169,-0.331,+0.5
+    int v = ((128 * r - 107 * g - 21 * b) >> 8) + 128; // ~+0.5,-0.419,-0.081
     *Y = clamp_u8(y);
     *U = clamp_u8(u);
     *V = clamp_u8(v);
 }
 
-static inline void yuyv_put_pixel(uint8_t *buf, int width, int height,
-                                  int x, int y, uint8_t Y, uint8_t U, uint8_t V)
-{
-    if ((unsigned)x >= (unsigned)width || (unsigned)y >= (unsigned)height) return;
+static inline void yuyv_put_pixel(uint8_t *buf, int width, int height, int x, int y, uint8_t Y,
+                                  uint8_t U, uint8_t V) {
+    if ((unsigned)x >= (unsigned)width || (unsigned)y >= (unsigned)height)
+        return;
 
-    int pair_x = x & ~1;                 // начало пары (четный x)
+    int pair_x = x & ~1; // начало пары (четный x)
     int pair_index = (y * width + pair_x) * 2;
 
     // Запишем U и V для пары
-    buf[pair_index + 1] = U;             // U0
-    buf[pair_index + 3] = V;             // V0
+    buf[pair_index + 1] = U; // U0
+    buf[pair_index + 3] = V; // V0
 
     // Запишем яркость для нужного пикселя
-    if ((x & 1) == 0) buf[pair_index + 0] = Y;   // Y0
-    else              buf[pair_index + 2] = Y;   // Y1
+    if ((x & 1) == 0)
+        buf[pair_index + 0] = Y; // Y0
+    else
+        buf[pair_index + 2] = Y; // Y1
 }
 
-static void yuyv_fill_rect_rgb(uint8_t *buf, int w, int h,
-                               int x0, int y0, int rw, int rh,
-                               uint8_t r, uint8_t g, uint8_t b)
-{
-    uint8_t Y,U,V;
-    rgb_to_yuv(r,g,b,&Y,&U,&V);
+static void yuyv_fill_rect_rgb(uint8_t *buf, int w, int h, int x0, int y0, int rw, int rh,
+                               uint8_t r, uint8_t g, uint8_t b) {
+    uint8_t Y, U, V;
+    rgb_to_yuv(r, g, b, &Y, &U, &V);
     for (int y = y0; y < y0 + rh; y++) {
         for (int x = x0; x < x0 + rw; x++) {
             yuyv_put_pixel(buf, w, h, x, y, Y, U, V);
@@ -184,9 +184,7 @@ static void yuyv_fill_rect_rgb(uint8_t *buf, int w, int h,
 }
 
 void V4L2Capturer::DrawDebugInfo(void *buffer) {
-    if (format_ != V4L2_PIX_FMT_YUYV) {
-        return;
-    }
+    yuv422_fmt_t fmt = static_cast<yuv422_fmt_t>(format_);
     // const int bar_h = 40;
     // const uint8_t bars[8][3] = {
     //     {255,255,255}, // white
@@ -201,11 +199,11 @@ void V4L2Capturer::DrawDebugInfo(void *buffer) {
     // for (int i = 0; i < 8; i++) {
     //     int x0 = (width_ * i) / 8;
     //     int x1 = (width_ * (i+1)) / 8;
-    //     yuyv_fill_rect_rgb(static_cast<uint8_t *>(buffer), width_, height_, x0, 0, x1 - x0, bar_h, bars[i][0], bars[i][1], bars[i][2]);
+    //     yuyv_fill_rect_rgb(static_cast<uint8_t *>(buffer), width_, height_, x0, 0, x1 - x0,
+    //     bar_h, bars[i][0], bars[i][1], bars[i][2]);
     // }
-    overlay_clock_yuv422(static_cast<uint8_t *>(buffer), width_, height_, width_ * 2, FMT_YUYV);
+    overlay_clock_yuv422(static_cast<uint8_t *>(buffer), width_, height_, width_ * 2, fmt);
 }
-
 
 void V4L2Capturer::CaptureImage() {
     fd_set fds;
@@ -242,10 +240,10 @@ void V4L2Capturer::CaptureImage() {
             return;
         }
     }
-    if (format_ == V4L2_PIX_FMT_YUYV) {
+    if (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY) {
         static bool first_frame = true;
         if (first_frame) {
-            INFO_PRINT("Drawing debug info on YUYV frames");
+            INFO_PRINT("Drawing debug info on %s frames", V4L2Util::FourccToString(format_).c_str());
             first_frame = false;
         }
         DrawDebugInfo((uint8_t *)capture_.buffers[buf.index].start);
