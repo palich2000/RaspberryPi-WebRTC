@@ -66,13 +66,17 @@ if(${PLATFORM} STREQUAL "jetson")
     )
 elseif(${PLATFORM} STREQUAL "raspberrypi")
     set(RPI_PLATFORM ON)
-    set(USE_LIBCAMERA_CAPTURE ON)
+    # libcamera links liblttng-ust, which busy-loops at startup on Bookworm. Make it
+    # optional so a V4L2-only build can drop it entirely: -DUSE_LIBCAMERA_CAPTURE=OFF
+    option(USE_LIBCAMERA_CAPTURE "Enable libcamera capture (links libcamera/liblttng-ust)" ON)
     set(USE_RPI_HW_ENCODER ON)
     add_definitions(
         -DRPI_PLATFORM
-        -DUSE_LIBCAMERA_CAPTURE
         -DUSE_RPI_HW_ENCODER
     )
+    if(USE_LIBCAMERA_CAPTURE)
+        add_definitions(-DUSE_LIBCAMERA_CAPTURE)
+    endif()
 else()
     message(FATAL_ERROR "Unknown PLATFORM: ${PLATFORM}")
 endif()
