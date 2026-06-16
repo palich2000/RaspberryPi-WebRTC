@@ -6,8 +6,8 @@
 
 class JetsonRecorder : public VideoRecorder {
   public:
-    static std::unique_ptr<JetsonRecorder> Create(int width, int height, int fps);
-    JetsonRecorder(int width, int height, int fps);
+    static std::unique_ptr<JetsonRecorder> Create(int width, int height, int fps, int bitrate);
+    JetsonRecorder(int width, int height, int fps, int bitrate);
 
   protected:
     void ReleaseEncoder() override;

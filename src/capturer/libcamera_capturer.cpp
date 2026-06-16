@@ -54,6 +54,11 @@ void LibcameraCapturer::InitCamera() {
     INFO_PRINT("camera id: %s", cam_id.c_str());
     camera_ = cm_->get(cam_id);
     camera_->acquire();
+
+    // The camera may be physically unplugged - libcamera emits the disconnected
+    // signal. Exit with an error so systemd restarts the service and the camera
+    // can be reconnected on the fly.
+    camera_->disconnected.connect(this, &LibcameraCapturer::CameraDisconnected);
     camera_config_ = camera_->generateConfiguration({libcamera::StreamRole::VideoRecording});
 
     if (rotation_ == 90) {
@@ -309,6 +314,11 @@ void LibcameraCapturer::RequestComplete(libcamera::Request *request) {
     }
 
     camera_->queueRequest(request);
+}
+
+void LibcameraCapturer::CameraDisconnected() {
+    ERROR_PRINT("Camera disconnected. Exiting with error so the service restarts.");
+    exit(EXIT_FAILURE);
 }
 
 webrtc::scoped_refptr<webrtc::I420BufferInterface> LibcameraCapturer::GetI420Frame(int stream_idx) {

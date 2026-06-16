@@ -36,6 +36,9 @@ class RtcChannel : public webrtc::DataChannelObserver,
     void OnStateChange() override;
     void OnMessage(const webrtc::DataBuffer &buffer) override;
     void OnClosed(std::function<void()> func);
+    // Викликається один раз, коли канал переходить у стан kOpen. Передає сам канал,
+    // щоб обробник міг одразу щось надіслати (напр. поточний стан запису новому клієнту).
+    void OnOpened(std::function<void(std::shared_ptr<RtcChannel>)> func);
 
     void Terminate();
     void RegisterHandler(protocol::CommandType type, CommandHandler func);
@@ -57,6 +60,8 @@ class RtcChannel : public webrtc::DataChannelObserver,
     std::string id_;
     std::string label_;
     std::function<void()> on_closed_func_;
+    std::function<void(std::shared_ptr<RtcChannel>)> on_opened_func_;
+    bool opened_fired_ = false;
 
     Subject<std::string> custom_cmd_subject_;
     std::vector<Subscription> subscriptions_;

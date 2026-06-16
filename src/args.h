@@ -129,6 +129,7 @@ struct Args {
     std::string record_path = "";
     std::string record_ondemand_path = "";
     int file_duration = 60;
+    int record_bitrate = 0; // recording video bitrate in kbps; 0 = auto (from resolution/fps)
 
     // ipc
     bool enable_ipc = false;
@@ -141,6 +142,7 @@ struct Args {
     int peer_timeout = 10;
     bool hw_accel = false;
     bool no_adaptive = false;
+    bool no_clock = false; // disable the clock overlay on the stream (clock is on by default)
     std::string uid = "";
     std::string stun_url = "stun:stun.l.google.com:19302";
     std::string turn_url = "";

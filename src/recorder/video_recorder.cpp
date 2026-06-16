@@ -5,11 +5,12 @@
 #include "common/logging.h"
 #include "common/utils.h"
 
-VideoRecorder::VideoRecorder(int width, int height, int fps, AVCodecID encoder_id)
+VideoRecorder::VideoRecorder(int width, int height, int fps, int bitrate, AVCodecID encoder_id)
     : Recorder(),
       fps(fps),
       width(width),
       height(height),
+      bitrate(bitrate),
       encoder_id(encoder_id),
       frame_buffer_queue(fps),
       base_time_initialized(false) {}

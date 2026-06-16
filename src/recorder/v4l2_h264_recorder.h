@@ -6,8 +6,8 @@
 
 class V4L2H264Recorder : public VideoRecorder {
   public:
-    static std::unique_ptr<V4L2H264Recorder> Create(int width, int height, int fps);
-    V4L2H264Recorder(int width, int height, int fps);
+    static std::unique_ptr<V4L2H264Recorder> Create(int width, int height, int fps, int bitrate);
+    V4L2H264Recorder(int width, int height, int fps, int bitrate);
 
   protected:
     void ReleaseEncoder() override;

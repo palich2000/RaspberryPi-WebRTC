@@ -260,13 +260,22 @@ void Conductor::InitializeCommandChannel(webrtc::scoped_refptr<RtcPeer> peer) {
             StopRecording(datachannel, pkt);
         });
 
-    cmd_channel->OnClosed([this]() {
+    // НЕ зупиняємо on-demand запис при відключенні піра. Запис має переживати
+    // refresh сторінки / пере連'єднання і триває до явного STOP_RECORDING.
+    // Натомість, коли командний канал відкривається, одразу повідомляємо новому
+    // клієнту поточний стан запису - щоб індикатор був коректним після refresh.
+    cmd_channel->OnOpened([this](std::shared_ptr<RtcChannel> channel) {
         auto recorder = ondemand_recorder_.lock();
-        if (recorder && recorder->is_recording()) {
-            DEBUG_PRINT("Peer disconnected: Auto-stop on-demand recording when peer disconnects "
-                        "(kFailed / kClosed)");
-            recorder->Stop();
+        if (!recorder) {
+            return;
         }
+        protocol::RecordingResponse resp;
+        bool recording = recorder->is_recording();
+        resp.set_is_recording(recording);
+        if (recording) {
+            resp.set_filepath(recorder->current_filepath());
+        }
+        channel->Send(resp);
     });
 }
 
@@ -405,8 +414,15 @@ void Conductor::StartRecording(std::shared_ptr<RtcChannel> datachannel,
         ERROR_PRINT("On-demand recorder is not set.");
         return;
     }
-    recorder->Start();
-    DEBUG_PRINT("On-demand recording started.");
+    // Ідемпотентно: повторний Start() поверх активного запису створив би новий
+    // fmt_ctx, не закривши попередній (витік + зіпсований поточний файл). Якщо вже
+    // пишемо - просто повертаємо поточний стан.
+    if (!recorder->is_recording()) {
+        recorder->Start();
+        INFO_PRINT("On-demand recording started: %s", recorder->current_filepath().c_str());
+    } else {
+        DEBUG_PRINT("On-demand recording already running; reporting current state.");
+    }
 
     protocol::RecordingResponse resp;
     resp.set_is_recording(true);
@@ -422,8 +438,12 @@ void Conductor::StopRecording(std::shared_ptr<RtcChannel> datachannel,
         return;
     }
     const std::string filepath = recorder->current_filepath();
-    recorder->Stop();
-    DEBUG_PRINT("On-demand recording stopped.");
+    if (recorder->is_recording()) {
+        recorder->Stop();
+        INFO_PRINT("On-demand recording stopped: %s", filepath.c_str());
+    } else {
+        DEBUG_PRINT("On-demand recording was not running.");
+    }
 
     protocol::RecordingResponse resp;
     resp.set_is_recording(false);

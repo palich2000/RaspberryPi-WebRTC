@@ -106,16 +106,18 @@ void RecorderManager::CreateVideoRecorder(std::shared_ptr<VideoCapturer> capture
         if (config.record_type == RecordType::Snapshot) {
             return nullptr;
         }
+        // Recording bitrate from CLI is in kbps; encoders expect bps. 0 = auto.
+        int bitrate = config.record_bitrate * 1000;
         if (capturer->format() == V4L2_PIX_FMT_H264) {
             return RawH264Recorder::Create(width, height, fps);
         } else if (config.hw_accel) {
 #if defined(USE_RPI_HW_ENCODER)
-            return V4L2H264Recorder::Create(width, height, fps);
+            return V4L2H264Recorder::Create(width, height, fps, bitrate);
 #elif defined(USE_JETSON_HW_ENCODER)
-            return JetsonRecorder::Create(width, height, fps);
+            return JetsonRecorder::Create(width, height, fps, bitrate);
 #endif
         }
-        return Openh264Recorder::Create(width, height, fps);
+        return Openh264Recorder::Create(width, height, fps, bitrate);
     })();
 }
 
@@ -135,7 +137,10 @@ RecorderManager::RecorderManager(Args config)
       auto_start_(true),
       header_written_(false),
       has_first_keyframe(false),
-      record_path(config.record_path) {}
+      record_path(config.record_path),
+      next_generate_time_(0),
+      time_reset_pending_(false),
+      base_start_time_{} {}
 
 void RecorderManager::SubscribeVideoSource(std::shared_ptr<VideoCapturer> video_src) {
     video_subscription_ = video_src->Subscribe(
@@ -143,27 +148,43 @@ void RecorderManager::SubscribeVideoSource(std::shared_ptr<VideoCapturer> video_
             bool is_keyframe = (buffer->flags() & V4L2_BUF_FLAG_KEYFRAME) ||
                                (video_src_->format() != V4L2_PIX_FMT_H264);
 
-            // waiting first keyframe to start recorders.
+            // Auto/background mode: start recorders on the first keyframe.
+            // On-demand mode starts via Start() called from the DataChannel handler.
             if (auto_start_ && !has_first_keyframe && is_keyframe) {
                 Start();
-                base_start_time_ = buffer->timestamp();
-                next_generate_time_ = ++file_index_ * config.file_duration;
             }
 
-            int64_t total_elapsed_us =
-                (int64_t)(buffer->timestamp().tv_sec - base_start_time_.tv_sec) * 1000000LL +
-                (int64_t)(buffer->timestamp().tv_usec - base_start_time_.tv_usec);
-            double total_elapsed_time = total_elapsed_us / 1e6;
-
             if (has_first_keyframe) {
-                if (total_elapsed_time >= next_generate_time_ && is_keyframe) {
-                    Stop();
-                    Start();
+                // Anchor the file-split timer on the first keyframe after a fresh
+                // start (auto-start or on-demand START_RECORDING). Internal rotation
+                // keeps the original anchor to avoid cumulative clock drift.
+                if (time_reset_pending_ && is_keyframe) {
+                    base_start_time_ = buffer->timestamp();
+                    file_index_ = 0;
                     next_generate_time_ = ++file_index_ * config.file_duration;
+                    time_reset_pending_ = false;
                 }
 
-                if (video_recorder) {
-                    video_recorder->OnBuffer(buffer);
+                // While waiting for the first keyframe to anchor, drop frames so the
+                // muxer always opens a file on a keyframe.
+                if (!time_reset_pending_) {
+                    int64_t total_elapsed_us =
+                        (int64_t)(buffer->timestamp().tv_sec - base_start_time_.tv_sec) *
+                            1000000LL +
+                        (int64_t)(buffer->timestamp().tv_usec - base_start_time_.tv_usec);
+                    double total_elapsed_time = total_elapsed_us / 1e6;
+
+                    if (total_elapsed_time >= next_generate_time_ && is_keyframe) {
+                        Stop();
+                        Start();
+                        // Keep the original anchor across rotation (anti-drift).
+                        time_reset_pending_ = false;
+                        next_generate_time_ = ++file_index_ * config.file_duration;
+                    }
+
+                    if (video_recorder) {
+                        video_recorder->OnBuffer(buffer);
+                    }
                 }
             }
         },
@@ -275,6 +296,10 @@ void RecorderManager::Start() {
         MakePreviewImage(image_path);
     }
 
+    // Request the file-split timer to re-anchor on the next keyframe. The video
+    // subscription clears this flag right after an internal rotation so cumulative
+    // timing stays drift-free; a fresh (auto or on-demand) start keeps it set.
+    time_reset_pending_ = true;
     has_first_keyframe = true;
 }
 

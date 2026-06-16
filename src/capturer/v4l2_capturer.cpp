@@ -1,6 +1,8 @@
 #include "v4l2_capturer.h"
 
 // Linux
+#include <cerrno>
+#include <cstring>
 #include <linux/videodev2.h>
 #include <sys/mman.h>
 #include <sys/select.h>
@@ -29,8 +31,10 @@ V4L2Capturer::V4L2Capturer(Args args)
       buffer_count_(4),
       hw_accel_(args.hw_accel),
       has_first_keyframe_(false),
+      draw_clock_(!args.no_clock),
       format_(args.format),
-      config_(args) {}
+      config_(args),
+      capture_failure_count_(0) {}
 
 V4L2Capturer::~V4L2Capturer() {
     worker_.reset();
@@ -214,10 +218,15 @@ void V4L2Capturer::CaptureImage() {
     tv.tv_usec = 200000; // 200 ms
     int r = select(fd_ + 1, &fds, NULL, NULL, &tv);
     if (r == -1) {
-        ERROR_PRINT("select failed");
+        if (errno == EINTR) {
+            return; // interrupted by a signal - not counted as a failure
+        }
+        ERROR_PRINT("select failed: %s", strerror(errno));
+        HandleCaptureFailure("select error");
         return;
     } else if (r == 0) { // timeout
         DEBUG_PRINT("capture timeout");
+        HandleCaptureFailure("capture timeout");
         return;
     }
 
@@ -226,8 +235,12 @@ void V4L2Capturer::CaptureImage() {
     buf.memory = capture_.memory;
 
     if (!V4L2Util::DequeueBuffer(fd_, &buf)) {
+        HandleCaptureFailure("dequeue buffer failed");
         return;
     }
+
+    // Frame captured successfully - reset the consecutive failure counter.
+    capture_failure_count_ = 0;
 
     auto buffer = V4L2Buffer::FromV4L2((uint8_t *)capture_.buffers[buf.index].start, buf, format_);
     frame_buffer_ = V4L2FrameBuffer::Create(width_, height_, buffer);
@@ -240,7 +253,7 @@ void V4L2Capturer::CaptureImage() {
             return;
         }
     }
-    if (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY) {
+    if (draw_clock_ && (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY)) {
         static bool first_frame = true;
         if (first_frame) {
             INFO_PRINT("Drawing debug info on %s frames", V4L2Util::FourccToString(format_).c_str());
@@ -264,6 +277,15 @@ void V4L2Capturer::CaptureImage() {
 
     if (!V4L2Util::QueueBuffer(fd_, &buf)) {
         return;
+    }
+}
+
+void V4L2Capturer::HandleCaptureFailure(const char *reason) {
+    if (++capture_failure_count_ >= kMaxCaptureFailures) {
+        ERROR_PRINT("Camera produced no frames (%s) for too long - device likely "
+                    "disconnected. Exiting with error so the service restarts.",
+                    reason);
+        exit(EXIT_FAILURE);
     }
 }
 

@@ -17,7 +17,7 @@ extern "C" {
 
 class VideoRecorder : public Recorder<V4L2FrameBufferRef> {
   public:
-    VideoRecorder(int width, int height, int fps, AVCodecID encoder_id);
+    VideoRecorder(int width, int height, int fps, int bitrate, AVCodecID encoder_id);
     virtual ~VideoRecorder() {};
     void OnBuffer(V4L2FrameBufferRef buffer) override;
     void OnStart() override final;
@@ -26,6 +26,7 @@ class VideoRecorder : public Recorder<V4L2FrameBufferRef> {
     int fps;
     int width;
     int height;
+    int bitrate; // configured recording bitrate in bps; 0 = auto
     AVCodecID encoder_id;
     ThreadSafeQueue<V4L2FrameBufferRef> frame_buffer_queue;
 

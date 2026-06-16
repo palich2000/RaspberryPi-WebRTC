@@ -63,6 +63,7 @@ class LibcameraCapturer : public VideoCapturer {
     void InitControls(Args arg);
     void AllocateBuffer();
     void RequestComplete(libcamera::Request *request);
+    void CameraDisconnected();
 };
 
 #endif

@@ -3,12 +3,13 @@
 
 const float bpp_factor = 0.06f;
 
-std::unique_ptr<JetsonRecorder> JetsonRecorder::Create(int width, int height, int fps) {
-    return std::make_unique<JetsonRecorder>(width, height, fps);
+std::unique_ptr<JetsonRecorder> JetsonRecorder::Create(int width, int height, int fps,
+                                                       int bitrate) {
+    return std::make_unique<JetsonRecorder>(width, height, fps, bitrate);
 }
 
-JetsonRecorder::JetsonRecorder(int width, int height, int fps)
-    : VideoRecorder(width, height, fps, AV_CODEC_ID_AV1) {}
+JetsonRecorder::JetsonRecorder(int width, int height, int fps, int bitrate)
+    : VideoRecorder(width, height, fps, bitrate, AV_CODEC_ID_AV1) {}
 
 void JetsonRecorder::Encode(V4L2FrameBufferRef frame_buffer) {
     if (!encoder_) {
@@ -16,7 +17,7 @@ void JetsonRecorder::Encode(V4L2FrameBufferRef frame_buffer) {
             .width = width,
             .height = height,
             .fps = fps,
-            .bitrate = static_cast<int>(width * height * fps * bpp_factor),
+            .bitrate = bitrate > 0 ? bitrate : static_cast<int>(width * height * fps * bpp_factor),
             .keyframe_interval = 0,
             .idr_interval = fps,
             .is_dma_src = true,

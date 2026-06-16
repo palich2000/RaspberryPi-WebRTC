@@ -179,6 +179,8 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
             "Defaults to ${record-path}/on-demand/ if not set.")
         ("file-duration", bpo::value<int>(&args.file_duration)->default_value(args.file_duration),
             "The duration (in seconds) of each video file, or the interval between snapshots.")
+        ("record-bitrate", bpo::value<int>(&args.record_bitrate)->default_value(args.record_bitrate),
+            "Recording video bitrate in kbps. 0 means auto (computed from resolution and fps).")
         ("jpeg-quality", bpo::value<int>(&args.jpeg_quality)->default_value(args.jpeg_quality),
             "Set the quality of the snapshot and thumbnail images in range 0 to 100.")
         ("peer-timeout", bpo::value<int>(&args.peer_timeout)->default_value(args.peer_timeout),
@@ -189,6 +191,8 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
         ("no-adaptive", bpo::bool_switch(&args.no_adaptive)->default_value(args.no_adaptive),
             "Disable WebRTC's adaptive resolution scaling. When enabled, "
             "the output resolution will remain fixed regardless of network or device conditions.")
+        ("no-clock", bpo::bool_switch(&args.no_clock)->default_value(args.no_clock),
+            "Disable the clock overlay drawn on the stream. The clock is enabled by default.")
         ("enable-ipc", bpo::bool_switch(&args.enable_ipc)->default_value(args.enable_ipc),
             "Enable IPC relay using a WebRTC DataChannel, lossy (UDP-like) or reliable (TCP-like) based on client preference.")
         ("ipc-channel",  bpo::value<std::string>(&args.ipc_channel)->default_value(args.ipc_channel),

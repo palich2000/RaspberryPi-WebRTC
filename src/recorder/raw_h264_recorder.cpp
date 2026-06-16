@@ -10,7 +10,7 @@ std::unique_ptr<RawH264Recorder> RawH264Recorder::Create(int width, int height, 
 }
 
 RawH264Recorder::RawH264Recorder(int width, int height, int fps)
-    : VideoRecorder(width, height, fps, AV_CODEC_ID_H264),
+    : VideoRecorder(width, height, fps, 0, AV_CODEC_ID_H264),
       has_sps_(false),
       has_pps_(false),
       has_first_keyframe_(false) {};

@@ -27,6 +27,15 @@ void RtcChannel::OnStateChange() {
     webrtc::DataChannelInterface::DataState state = data_channel->state();
     DEBUG_PRINT("[%s] OnStateChange => %s", data_channel->label().c_str(),
                 webrtc::DataChannelInterface::DataStateString(state));
+
+    if (state == webrtc::DataChannelInterface::kOpen && !opened_fired_ && on_opened_func_) {
+        // weak_from_this().lock() замість shared_from_this(): захист на випадок, якщо
+        // OnStateChange спрацює до того, як об'єкт буде у володінні shared_ptr.
+        if (auto self = weak_from_this().lock()) {
+            opened_fired_ = true;
+            on_opened_func_(self);
+        }
+    }
 }
 
 void RtcChannel::Terminate() {
@@ -47,6 +56,10 @@ void RtcChannel::Terminate() {
 }
 
 void RtcChannel::OnClosed(std::function<void()> func) { on_closed_func_ = std::move(func); }
+
+void RtcChannel::OnOpened(std::function<void(std::shared_ptr<RtcChannel>)> func) {
+    on_opened_func_ = std::move(func);
+}
 
 void RtcChannel::OnMessage(const webrtc::DataBuffer &buffer) {
     const uint8_t *data = buffer.data.data<uint8_t>();

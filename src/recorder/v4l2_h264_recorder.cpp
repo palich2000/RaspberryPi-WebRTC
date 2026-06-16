@@ -1,11 +1,12 @@
 #include "recorder/v4l2_h264_recorder.h"
 
-std::unique_ptr<V4L2H264Recorder> V4L2H264Recorder::Create(int width, int height, int fps) {
-    return std::make_unique<V4L2H264Recorder>(width, height, fps);
+std::unique_ptr<V4L2H264Recorder> V4L2H264Recorder::Create(int width, int height, int fps,
+                                                          int bitrate) {
+    return std::make_unique<V4L2H264Recorder>(width, height, fps, bitrate);
 }
 
-V4L2H264Recorder::V4L2H264Recorder(int width, int height, int fps)
-    : VideoRecorder(width, height, fps, AV_CODEC_ID_H264) {}
+V4L2H264Recorder::V4L2H264Recorder(int width, int height, int fps, int bitrate)
+    : VideoRecorder(width, height, fps, bitrate, AV_CODEC_ID_H264) {}
 
 void V4L2H264Recorder::Encode(V4L2FrameBufferRef frame_buffer) {
     if (!encoder_) {
@@ -13,7 +14,7 @@ void V4L2H264Recorder::Encode(V4L2FrameBufferRef frame_buffer) {
             .width = width,
             .height = height,
             .fps = fps,
-            .bitrate = static_cast<int>(width * height * fps * 0.1),
+            .bitrate = bitrate > 0 ? bitrate : static_cast<int>(width * height * fps * 0.1),
             .keyframe_interval = 30,
             .is_dma_src = false,
             .src_pix_fmt = frame_buffer->format(),

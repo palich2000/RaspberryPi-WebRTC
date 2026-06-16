@@ -1,11 +1,12 @@
 #include "recorder/openh264_recorder.h"
 
-std::unique_ptr<Openh264Recorder> Openh264Recorder::Create(int width, int height, int fps) {
-    return std::make_unique<Openh264Recorder>(width, height, fps);
+std::unique_ptr<Openh264Recorder> Openh264Recorder::Create(int width, int height, int fps,
+                                                           int bitrate) {
+    return std::make_unique<Openh264Recorder>(width, height, fps, bitrate);
 }
 
-Openh264Recorder::Openh264Recorder(int width, int height, int fps)
-    : VideoRecorder(width, height, fps, AV_CODEC_ID_H264) {}
+Openh264Recorder::Openh264Recorder(int width, int height, int fps, int bitrate)
+    : VideoRecorder(width, height, fps, bitrate, AV_CODEC_ID_H264) {}
 
 void Openh264Recorder::Encode(V4L2FrameBufferRef frame_buffer) {
     if (!encoder_) {
@@ -13,7 +14,7 @@ void Openh264Recorder::Encode(V4L2FrameBufferRef frame_buffer) {
             .width = width,
             .height = height,
             .fps = fps,
-            .bitrate = static_cast<int>(width * height * fps * 0.1),
+            .bitrate = bitrate > 0 ? bitrate : static_cast<int>(width * height * fps * 0.1),
             .keyframe_interval = fps,
             .rc_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
         };

@@ -42,8 +42,15 @@ class V4L2Capturer : public VideoCapturer {
     int buffer_count_;
     bool hw_accel_;
     bool has_first_keyframe_;
+    bool draw_clock_; // whether to draw the clock overlay on the stream (--no-clock disables it)
     uint32_t format_;
     Args config_;
+    // Consecutive capture failures (timeout / select error / DQBUF error).
+    // If the camera is unplugged, frames stop arriving - once the threshold
+    // is exceeded we exit with an error so systemd restarts the service.
+    int capture_failure_count_;
+    // select() waits 200ms, so ~25 consecutive failures = about 5s without frames.
+    static constexpr int kMaxCaptureFailures = 25;
     V4L2BufferGroup capture_;
     std::unique_ptr<Worker> worker_;
     std::unique_ptr<V4L2Decoder> decoder_;
@@ -54,6 +61,7 @@ class V4L2Capturer : public VideoCapturer {
     void Initialize();
     bool IsCompressedFormat() const;
     void CaptureImage();
+    void HandleCaptureFailure(const char *reason);
     void DrawDebugInfo(void *buffer);
     bool CheckMatchingDevice(std::string unique_name);
     int GetCameraIndex(webrtc::VideoCaptureModule::DeviceInfo *device_info);
