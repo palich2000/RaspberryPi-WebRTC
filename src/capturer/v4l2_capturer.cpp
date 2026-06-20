@@ -301,6 +301,30 @@ void V4L2Capturer::CaptureImage() {
     // (The device is alive even if this particular frame turns out corrupt.)
     capture_failure_count_ = 0;
 
+    // Measure the REAL rate we dequeue frames from the camera (all frames, good or
+    // corrupt). Logged every ~10s in debug. A drop well below the configured fps -
+    // especially right after recording starts - means the capture loop can't keep up
+    // and QBUF is delayed, starving the camera (USB isoc loss).
+    {
+        int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+        if (capture_window_start_ms_ == 0) {
+            capture_window_start_ms_ = now_ms;
+        }
+        capture_window_frames_++;
+        int64_t el_ms = now_ms - capture_window_start_ms_;
+        if (el_ms >= 10000) {
+            DEBUG_PRINT("Capture rate /dev/video%d: %.1f fps dequeued "
+                        "(%d frames / %.1fs, %d dropped bad) [configured %d]",
+                        camera_id_, capture_window_frames_ * 1000.0 / (double)el_ms,
+                        capture_window_frames_, el_ms / 1000.0, capture_window_dropped_, fps_);
+            capture_window_frames_ = 0;
+            capture_window_dropped_ = 0;
+            capture_window_start_ms_ = now_ms;
+        }
+    }
+
     // Drop frames the kernel flagged as corrupt (lost USB isoc packets on the UVC
     // camera) or that are short for an uncompressed format. Otherwise the partial/
     // stale MMAP buffer gets the clock drawn on it and encoded -> the "рассыпание"
@@ -312,6 +336,7 @@ void V4L2Capturer::CaptureImage() {
     }
     if (bad_frame) {
         dropped_frame_count_++;
+        capture_window_dropped_++;
         if (dropped_frame_count_ == 1 || dropped_frame_count_ % 30 == 0) {
             INFO_PRINT("Dropped corrupt/short camera frame "
                        "(flags=0x%x, bytesused=%u, total dropped=%d) — USB delivery loss",

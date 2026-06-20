@@ -182,6 +182,9 @@ void RecorderManager::SubscribeVideoSource(std::shared_ptr<VideoCapturer> video_
                         next_generate_time_ = ++file_index_ * config.file_duration;
                     }
 
+                    // OnBuffer just clones the frame into the recorder's own queue; the
+                    // actual encode runs on the "Recorder" worker thread, so this does
+                    // NOT block the capture loop. (See VideoRecorder::OnBuffer.)
                     if (video_recorder) {
                         video_recorder->OnBuffer(buffer);
                     }

@@ -48,9 +48,12 @@ template <typename T> class Recorder {
 
     void Start() {
         OnStart();
-        worker = std::make_unique<Worker>("Recorder", [this]() {
-            ConsumeBuffer();
-        });
+        // kNormal (NOT the default kHigh/real-time): recording is bulk work. A
+        // real-time recorder thread - and the openh264 worker threads it spawns, which
+        // inherit its scheduling - would preempt the kernel's USB isoc handling and
+        // make the camera drop frames while recording (the SX3 eventually hangs).
+        worker = std::make_unique<Worker>(
+            "Recorder", [this]() { ConsumeBuffer(); }, webrtc::ThreadPriority::kNormal);
         worker->Run();
     }
 

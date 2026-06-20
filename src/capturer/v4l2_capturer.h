@@ -52,6 +52,13 @@ class V4L2Capturer : public VideoCapturer {
     // Total frames dropped because the kernel flagged them corrupt or short
     // (typically lost USB isoc packets on the UVC camera).
     int dropped_frame_count_;
+    // Real DQBUF-rate measurement (debug). Counts frames pulled off the camera
+    // per ~10s window and logs the actual capture fps. If this falls well below
+    // the configured fps once recording starts, the capture loop is being starved
+    // by downstream work (encode/mux) blocking QBUF -> USB frame loss.
+    int capture_window_frames_ = 0;
+    int capture_window_dropped_ = 0;
+    int64_t capture_window_start_ms_ = 0;
     // select() waits 200ms, so ~25 consecutive failures = about 5s without frames.
     static constexpr int kMaxCaptureFailures = 25;
     // Patient re-open backoff (capped exponential) while waiting for a clean USB
