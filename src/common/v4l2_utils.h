@@ -62,7 +62,15 @@ class V4L2Util {
     static std::string FourccToString(uint32_t fourcc);
 
     static int OpenDevice(const char *file);
+    // Like OpenDevice but returns -1 instead of throwing when the node is
+    // absent (e.g. /dev/video0 gone during a USB re-enumeration). Required for
+    // the FindUsbCaptureDevice scan and the patient re-open retry loop.
+    static int TryOpenDevice(const char *file);
     static void CloseDevice(int fd);
+    // Negotiated capture image size (bytes) via VIDIOC_G_FMT; 0 on error.
+    // Used to reject a bogus frame size before REQBUFS would vmalloc gigabytes
+    // (corrupt UVC descriptor from a bad bridge re-enumeration).
+    static uint32_t GetCaptureImageSize(int fd, v4l2_buf_type type);
     static bool QueryCapabilities(int fd, v4l2_capability *cap);
     static bool InitBuffer(int fd, V4L2BufferGroup *gbuffer, v4l2_buf_type type, v4l2_memory memory,
                            bool has_dmafd = false);

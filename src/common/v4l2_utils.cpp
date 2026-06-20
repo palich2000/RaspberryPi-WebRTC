@@ -43,9 +43,37 @@ int V4L2Util::OpenDevice(const char *file) {
     return fd;
 }
 
+int V4L2Util::TryOpenDevice(const char *file) {
+    int fd = open(file, O_RDWR);
+    if (fd < 0) {
+        DEBUG_PRINT("Failed to open %s: %s", file, strerror(errno));
+        return -1;
+    }
+    DEBUG_PRINT("Successfully opened file %s (fd: %d)", file, fd);
+    return fd;
+}
+
 void V4L2Util::CloseDevice(int fd) {
     close(fd);
     DEBUG_PRINT("fd(%d) is closed!", fd);
+}
+
+uint32_t V4L2Util::GetCaptureImageSize(int fd, v4l2_buf_type type) {
+    v4l2_format fmt = {};
+    fmt.type = type;
+    if (ioctl(fd, VIDIOC_G_FMT, &fmt) < 0) {
+        ERROR_PRINT("fd(%d) get format: %s", fd, strerror(errno));
+        return 0;
+    }
+    if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+        type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < fmt.fmt.pix_mp.num_planes && i < VIDEO_MAX_PLANES; i++) {
+            total += fmt.fmt.pix_mp.plane_fmt[i].sizeimage;
+        }
+        return total > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)total;
+    }
+    return fmt.fmt.pix.sizeimage;
 }
 
 bool V4L2Util::QueryCapabilities(int fd, v4l2_capability *cap) {

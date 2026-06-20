@@ -1,11 +1,15 @@
 #include "v4l2_capturer.h"
 
 // Linux
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <linux/videodev2.h>
+#include <stdexcept>
 #include <sys/mman.h>
 #include <sys/select.h>
+#include <thread>
 
 // WebRTC
 #include <modules/video_capture/video_capture_factory.h>
@@ -16,7 +20,16 @@
 
 std::shared_ptr<V4L2Capturer> V4L2Capturer::Create(Args args) {
     auto ptr = std::make_shared<V4L2Capturer>(args);
-    ptr->Initialize();
+    // Patiently wait for a usable camera instead of crashing the process. The
+    // bridge re-enumerates clean and broken in turns (corrupt UVC descriptor ->
+    // bogus frame size); on a broken pass Initialize() returns false and we just
+    // back off and try again, grabbing the device the moment it comes back clean.
+    int backoff_s = kInitBackoffMinSec;
+    while (!ptr->Initialize()) {
+        INFO_PRINT("Camera not ready (no node / bad enumeration) - retrying in %ds.", backoff_s);
+        std::this_thread::sleep_for(std::chrono::seconds(backoff_s));
+        backoff_s = std::min(backoff_s * 2, kInitBackoffMaxSec);
+    }
     ptr->StartCapture();
     return ptr;
 }
@@ -34,7 +47,8 @@ V4L2Capturer::V4L2Capturer(Args args)
       draw_clock_(!args.no_clock),
       format_(args.format),
       config_(args),
-      capture_failure_count_(0) {}
+      capture_failure_count_(0),
+      dropped_frame_count_(0) {}
 
 V4L2Capturer::~V4L2Capturer() {
     worker_.reset();
@@ -44,22 +58,39 @@ V4L2Capturer::~V4L2Capturer() {
     V4L2Util::CloseDevice(fd_);
 }
 
-void V4L2Capturer::Initialize() {
+void V4L2Capturer::CloseFd() {
+    if (fd_ >= 0) {
+        V4L2Util::CloseDevice(fd_);
+        fd_ = -1;
+    }
+}
+
+bool V4L2Capturer::Initialize() {
     if (!hw_accel_ && format_ == V4L2_PIX_FMT_H264) {
+        // Genuine config error, not a transient device state - keep it fatal.
         INFO_PRINT("Software decoding H264 camera source is not supported.");
         exit(EXIT_FAILURE);
     }
 
     std::string devicePath = "/dev/video" + std::to_string(camera_id_);
-    fd_ = V4L2Util::OpenDevice(devicePath.c_str());
+    fd_ = V4L2Util::TryOpenDevice(devicePath.c_str());
     if (fd_ < 0) {
-        INFO_PRINT("Unable to open device: %s", devicePath.c_str());
-        exit(EXIT_FAILURE);
+        // The configured node is gone — commonly because a USB re-enumeration
+        // moved the camera (e.g. video0 -> video1 after a detach/reconnect).
+        // Scan for the USB capture device instead of failing outright.
+        INFO_PRINT("Unable to open %s, scanning for a USB capture device...",
+                   devicePath.c_str());
+        fd_ = FindUsbCaptureDevice();
+    }
+    if (fd_ < 0) {
+        INFO_PRINT("No USB capture device present yet");
+        return false; // recoverable: caller backs off and retries
     }
 
     if (!V4L2Util::InitBuffer(fd_, &capture_, V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_MEMORY_MMAP)) {
         ERROR_PRINT("Could not setup v4l2 capture buffer");
-        exit(EXIT_FAILURE);
+        CloseFd();
+        return false;
     }
 
     if (format_ == V4L2_PIX_FMT_H264) {
@@ -91,13 +122,40 @@ void V4L2Capturer::Initialize() {
         ERROR_PRINT("Unable to set the rotation angle");
     }
 
-    if (!V4L2Util::SetFormat(fd_, &capture_, width_, height_, format_)) {
-        ERROR_PRINT("Unable to set the resolution: %dx%d", width_, height_);
+    // SetFormat throws on a driver/input size mismatch (a corrupt re-enumeration
+    // can report bogus dimensions). Treat that as a recoverable bad enumeration.
+    try {
+        if (!V4L2Util::SetFormat(fd_, &capture_, width_, height_, format_)) {
+            ERROR_PRINT("Unable to set the resolution: %dx%d - will retry", width_, height_);
+            CloseFd();
+            return false;
+        }
+    } catch (const std::exception &e) {
+        ERROR_PRINT("SetFormat failed (%s) - bad USB enumeration, will retry", e.what());
+        CloseFd();
+        return false;
+    }
+
+    // Reject a bogus negotiated frame size BEFORE StartCapture()'s REQBUFS. A
+    // corrupt UVC descriptor (seen on bridge re-enumeration) yields a garbage
+    // dwMaxVideoFrameSize, and REQBUFS then tries to vmalloc ~2 GiB per buffer
+    // -> ENOMEM -> crash loop. 640x480 YUYV is 614400 B; anything past w*h*4 is
+    // impossible for our formats and means the enumeration is broken.
+    uint32_t image_size = V4L2Util::GetCaptureImageSize(fd_, capture_.type);
+    uint64_t sane_max = (uint64_t)width_ * height_ * 4;
+    if (image_size == 0 || (uint64_t)image_size > sane_max) {
+        ERROR_PRINT("Negotiated frame size %u looks bogus (sane max %llu for %dx%d) - "
+                    "corrupt USB descriptor from a bad re-enumeration; will retry",
+                    image_size, (unsigned long long)sane_max, width_, height_);
+        CloseFd();
+        return false;
     }
 
     if (!SetControls(V4L2_CID_MPEG_VIDEO_BITRATE, 10 * 1024 * 1024)) {
         ERROR_PRINT("Unable to set video bitrate");
     }
+
+    return true;
 }
 
 int V4L2Capturer::fps() const { return fps_; }
@@ -240,7 +298,28 @@ void V4L2Capturer::CaptureImage() {
     }
 
     // Frame captured successfully - reset the consecutive failure counter.
+    // (The device is alive even if this particular frame turns out corrupt.)
     capture_failure_count_ = 0;
+
+    // Drop frames the kernel flagged as corrupt (lost USB isoc packets on the UVC
+    // camera) or that are short for an uncompressed format. Otherwise the partial/
+    // stale MMAP buffer gets the clock drawn on it and encoded -> the "рассыпание"
+    // artifact. Dropping turns it into an honest fps drop instead of visible garbage.
+    bool bad_frame = (buf.flags & V4L2_BUF_FLAG_ERROR) != 0;
+    if (!bad_frame && !IsCompressedFormat() &&
+        buf.bytesused < (uint32_t)width_ * height_ * 2) {
+        bad_frame = true;
+    }
+    if (bad_frame) {
+        dropped_frame_count_++;
+        if (dropped_frame_count_ == 1 || dropped_frame_count_ % 30 == 0) {
+            INFO_PRINT("Dropped corrupt/short camera frame "
+                       "(flags=0x%x, bytesused=%u, total dropped=%d) — USB delivery loss",
+                       buf.flags, buf.bytesused, dropped_frame_count_);
+        }
+        V4L2Util::QueueBuffer(fd_, &buf);
+        return;
+    }
 
     auto buffer = V4L2Buffer::FromV4L2((uint8_t *)capture_.buffers[buf.index].start, buf, format_);
     frame_buffer_ = V4L2FrameBuffer::Create(width_, height_, buffer);
@@ -281,12 +360,52 @@ void V4L2Capturer::CaptureImage() {
 }
 
 void V4L2Capturer::HandleCaptureFailure(const char *reason) {
+    // Tell a real disconnect from a transient stall: if QUERYCAP fails, the device
+    // node is gone (USB unplug). Exit immediately so we release the fd and free the
+    // /dev/videoN node — if we keep holding it (~5s of failures) while the camera
+    // re-enumerates, it comes back as a new node (video0 -> video1) and a restart
+    // that looks for the old node won't find it until a physical re-plug.
+    v4l2_capability cap = {};
+    if (!V4L2Util::QueryCapabilities(fd_, &cap)) {
+        ERROR_PRINT("Camera disconnected (%s) - releasing the device and exiting now "
+                    "so the service restarts and re-discovers it.",
+                    reason);
+        V4L2Util::CloseDevice(fd_);
+        exit(EXIT_FAILURE);
+    }
     if (++capture_failure_count_ >= kMaxCaptureFailures) {
         ERROR_PRINT("Camera produced no frames (%s) for too long - device likely "
-                    "disconnected. Exiting with error so the service restarts.",
+                    "stuck. Exiting with error so the service restarts.",
                     reason);
         exit(EXIT_FAILURE);
     }
+}
+
+int V4L2Capturer::FindUsbCaptureDevice() {
+    // Scan /dev/video* for the first USB video-capture node. Recovers from USB
+    // re-enumeration that moved the camera off its configured number.
+    for (int i = 0; i < 64; i++) {
+        std::string path = "/dev/video" + std::to_string(i);
+        int fd = V4L2Util::TryOpenDevice(path.c_str());
+        if (fd < 0) {
+            continue;
+        }
+        v4l2_capability cap = {};
+        if (V4L2Util::QueryCapabilities(fd, &cap)) {
+            uint32_t caps =
+                (cap.capabilities & V4L2_CAP_DEVICE_CAPS) ? cap.device_caps : cap.capabilities;
+            bool is_capture = (caps & V4L2_CAP_VIDEO_CAPTURE) != 0;
+            bool is_usb = strncmp((const char *)cap.bus_info, "usb", 3) == 0;
+            if (is_capture && is_usb) {
+                INFO_PRINT("Found USB capture device at %s (card: %s, bus: %s)", path.c_str(),
+                           cap.card, cap.bus_info);
+                camera_id_ = i;
+                return fd;
+            }
+        }
+        V4L2Util::CloseDevice(fd);
+    }
+    return -1;
 }
 
 bool V4L2Capturer::SetControls(int key, int value) { return V4L2Util::SetExtCtrl(fd_, key, value); }
@@ -303,7 +422,11 @@ Subscription V4L2Capturer::Subscribe(Subject<V4L2FrameBufferRef>::Callback callb
 void V4L2Capturer::StartCapture() {
     if (!V4L2Util::AllocateBuffer(fd_, &capture_, buffer_count_) ||
         !V4L2Util::QueueBuffers(fd_, &capture_)) {
-        exit(0);
+        // Should be rare now that Initialize() validates the frame size, but if
+        // REQBUFS still fails exit non-zero so systemd restarts (and Create()'s
+        // retry loop runs again) instead of exiting 0 and looking successful.
+        ERROR_PRINT("Failed to allocate/queue capture buffers - exiting for restart");
+        exit(EXIT_FAILURE);
     }
 
     V4L2Util::StreamOn(fd_, capture_.type);
