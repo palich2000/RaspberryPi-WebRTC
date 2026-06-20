@@ -49,8 +49,16 @@ class V4L2Capturer : public VideoCapturer {
     // If the camera is unplugged, frames stop arriving - once the threshold
     // is exceeded we exit with an error so systemd restarts the service.
     int capture_failure_count_;
+    // Total frames dropped because the kernel flagged them corrupt or short
+    // (typically lost USB isoc packets on the UVC camera).
+    int dropped_frame_count_;
     // select() waits 200ms, so ~25 consecutive failures = about 5s without frames.
     static constexpr int kMaxCaptureFailures = 25;
+    // Patient re-open backoff (capped exponential) while waiting for a clean USB
+    // enumeration. Replaces the tight ~5s systemd restart loop that hammered the
+    // bridge mid-re-enumeration. See FindUsbCaptureDevice / Initialize.
+    static constexpr int kInitBackoffMinSec = 2;
+    static constexpr int kInitBackoffMaxSec = 30;
     V4L2BufferGroup capture_;
     std::unique_ptr<Worker> worker_;
     std::unique_ptr<V4L2Decoder> decoder_;
@@ -58,10 +66,15 @@ class V4L2Capturer : public VideoCapturer {
     V4L2FrameBufferRef frame_buffer_;
     Subject<V4L2FrameBufferRef> stream_subject_;
 
-    void Initialize();
+    // Returns false on a RECOVERABLE failure (node absent, bad enumeration,
+    // bogus negotiated frame size) so Create() can back off and retry. Only
+    // genuine config errors (e.g. software H264) still exit().
+    bool Initialize();
+    void CloseFd();
     bool IsCompressedFormat() const;
     void CaptureImage();
     void HandleCaptureFailure(const char *reason);
+    int FindUsbCaptureDevice();
     void DrawDebugInfo(void *buffer);
     bool CheckMatchingDevice(std::string unique_name);
     int GetCameraIndex(webrtc::VideoCaptureModule::DeviceInfo *device_info);

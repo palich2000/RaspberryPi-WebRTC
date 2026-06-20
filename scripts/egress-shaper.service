@@ -1,0 +1,19 @@
+[Unit]
+Description=Tunable WebRTC egress traffic shaper (HTB + fq_codel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Interface is auto-detected from the default route. To pin it, uncomment:
+# Environment=IFACE=wlan0
+Environment=RATE_FILE=/run/pi-webrtc/egress_rate
+Environment=DEFAULT_RATE=off
+# Shape only UDP (media), leaving ssh/mqtt unthrottled: set to 1.
+Environment=SHAPE_UDP_ONLY=0
+ExecStart=/usr/local/bin/egress-shaper.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
