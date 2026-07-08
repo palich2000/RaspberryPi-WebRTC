@@ -71,6 +71,25 @@ struct Args {
     std::string camera = "libcamera:0";
     std::string v4l2_format = "mjpeg";
 
+    // Pin the UVC capture/DQBUF thread to this CPU core and move the camera's USB
+    // host-controller IRQ onto the same core, isolating capture from I/O jitter on
+    // the other cores (e.g. microSD writeback while recording, which otherwise
+    // delays QBUF and drops whole frames). -1 (default) = disabled / unpinned.
+    // Pair with kernel isolation (isolcpus + irqaffinity) on the same core for the
+    // full effect. USB cameras only; ignored otherwise.
+    int capture_cpu = -1;
+
+    // how the encoder degrades under congestion/CPU limits:
+    // framerate|balanced|resolution|disabled. Default framerate = the original
+    // hardcoded MAINTAIN_FRAMERATE behavior (keep fps, drop resolution).
+    std::string degradation = "framerate";
+
+    // max encode bitrate in kbps applied to the video sender's RtpParameters;
+    // 0 = leave the libwebrtc default (a resolution-based cap, ~1700 for VGA).
+    // Raising it gives headroom that can lower QP and let the QualityScaler
+    // upscale resolution back up after a downward excursion.
+    int max_bitrate = 0;
+
     // sub stream for multiple resolution capture
     int sub_width = 0;
     int sub_height = 0;
@@ -164,6 +183,7 @@ struct Args {
     bool use_websocket = false;
     bool use_tls = false;
     std::string ws_host = "";
+    uint16_t ws_port = 0; // 0 = default (443 with TLS, otherwise 80)
     std::string ws_room = "";
     std::string ws_key = "";
 };

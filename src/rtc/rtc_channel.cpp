@@ -1,5 +1,7 @@
 #include "rtc/rtc_channel.h"
 
+#include <pthread.h>
+
 #include "common/logging.h"
 
 const int CHUNK_SIZE = 64 * 1024; // 64KB
@@ -155,6 +157,7 @@ void RtcChannel::Send(const uint8_t *data, size_t size) {
 }
 
 void RtcChannel::SendLoop() {
+    pthread_setname_np(pthread_self(), "dc-send");
     while (true) {
         std::vector<uint8_t> buf;
         {

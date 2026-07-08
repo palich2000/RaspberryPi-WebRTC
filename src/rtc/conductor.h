@@ -40,6 +40,7 @@ class Conductor {
     void InitializeIpcServer();
     void InitializeDataChannels(webrtc::scoped_refptr<RtcPeer> peer);
     void InitializeCommandChannel(webrtc::scoped_refptr<RtcPeer> peer);
+    void RegisterRecordingHandlers(std::shared_ptr<RtcChannel> channel);
 
     void BindIpcToDataChannel(std::shared_ptr<RtcChannel> channel);
     void BindIpcToDataChannelSender(std::shared_ptr<RtcChannel> channel);

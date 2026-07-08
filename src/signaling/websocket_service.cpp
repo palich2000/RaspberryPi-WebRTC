@@ -48,9 +48,11 @@ WebsocketService::WebsocketService(Args args, std::shared_ptr<Conductor> conduct
                                    net::io_context &ioc)
     : SignalingService(conductor),
       args_(args),
+      ioc_(ioc),
       ws_(InitWebSocket(ioc)),
       resolver_(net::make_strand(ioc)),
-      ping_timer_(ioc) {}
+      ping_timer_(ioc),
+      reconnect_timer_(ioc) {}
 
 WebsocketService::~WebsocketService() { Disconnect(); }
 
@@ -73,8 +75,20 @@ WebSocketVariant WebsocketService::InitWebSocket(net::io_context &ioc) {
     }
 }
 
+void WebsocketService::RecreateWebSocket() {
+    // emplace (not assignment): beast's websocket stream is not move-assignable.
+    if (args_.use_tls) {
+        ssl::context ctx(ssl::context::tls);
+        ctx.set_default_verify_paths();
+        ctx.set_verify_mode(ssl::verify_peer);
+        ws_.emplace<websocket::stream<ssl::stream<tcp::socket>>>(net::make_strand(ioc_), ctx);
+    } else {
+        ws_.emplace<websocket::stream<tcp::socket>>(net::make_strand(ioc_));
+    }
+}
+
 void WebsocketService::Connect() {
-    auto port = args_.use_tls ? 443 : 80;
+    auto port = args_.ws_port != 0 ? args_.ws_port : (args_.use_tls ? 443 : 80);
     INFO_PRINT("Connect to WebSocket %s:%d", args_.ws_host.c_str(), port);
 
     resolver_.async_resolve(
@@ -85,7 +99,10 @@ void WebsocketService::Connect() {
 }
 
 void WebsocketService::Disconnect() {
+    // Explicit disconnect (shutdown or server "leave"): stop reconnecting.
+    stopping_ = true;
     ping_timer_.cancel();
+    reconnect_timer_.cancel();
 
     std::visit(
         [](auto &ws) {
@@ -104,9 +121,66 @@ void WebsocketService::Disconnect() {
         ws_);
 }
 
+void WebsocketService::HandleFailure(const std::string &reason) {
+    if (stopping_) {
+        return;
+    }
+    if (reconnecting_) {
+        // Another failing operation already scheduled a reconnect.
+        DEBUG_PRINT("%s (reconnect already pending)", reason.c_str());
+        return;
+    }
+    ERROR_PRINT("%s; reconnecting", reason.c_str());
+    ScheduleReconnect();
+}
+
+void WebsocketService::ScheduleReconnect() {
+    if (stopping_) {
+        return;
+    }
+    reconnecting_ = true;
+    ping_timer_.cancel();
+
+    // Force-close the socket so any in-flight read/write completes with an error,
+    // and tear down the broken session before the next attempt.
+    std::visit(
+        [](auto &ws) {
+            boost::system::error_code ec;
+            beast::get_lowest_layer(ws).close(ec);
+        },
+        ws_);
+
+    pub_peer_ = nullptr;
+    sub_peer_ = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        write_queue_.clear();
+    }
+    buffer_.consume(buffer_.size());
+
+    // Exponential backoff capped at 8s: 1, 2, 4, 8, 8, ...
+    int shift = reconnect_attempts_ < 3 ? reconnect_attempts_ : 3;
+    int delay = 1 << shift;
+    reconnect_attempts_++;
+    INFO_PRINT("Reconnecting to WebSocket in %ds", delay);
+
+    reconnect_timer_.expires_after(std::chrono::seconds(delay));
+    reconnect_timer_.async_wait([this](const boost::system::error_code &ec) {
+        if (ec || stopping_) {
+            return;
+        }
+        // Attempt starts now: clear the guard so a failure in THIS attempt can
+        // schedule the next one (with increased backoff).
+        reconnecting_ = false;
+        // Fresh stream for the new attempt; the old socket was closed above.
+        RecreateWebSocket();
+        Connect();
+    });
+}
+
 void WebsocketService::OnResolve(beast::error_code ec, tcp::resolver::results_type results) {
     if (ec) {
-        ERROR_PRINT("Failed to resolve: %s", ec.message().c_str());
+        HandleFailure("Failed to resolve: " + ec.message());
         return;
     }
 
@@ -122,7 +196,7 @@ void WebsocketService::OnResolve(beast::error_code ec, tcp::resolver::results_ty
 
 void WebsocketService::OnConnect(beast::error_code ec) {
     if (ec) {
-        ERROR_PRINT("Failed to connect: %s", ec.message().c_str());
+        HandleFailure("Failed to connect: " + ec.message());
         return;
     }
 
@@ -163,9 +237,14 @@ void WebsocketService::OnHandshake(websocket::stream<ssl::stream<tcp::socket>> &
 
 void WebsocketService::OnHandshake(beast::error_code ec) {
     if (ec) {
-        ERROR_PRINT("Failed to handshake: %s", ec.message().c_str());
+        HandleFailure("Failed to handshake: " + ec.message());
         return;
     }
+
+    // Connected: clear reconnect state so the next drop starts fresh backoff.
+    INFO_PRINT("WebSocket connected to %s", args_.ws_host.c_str());
+    reconnecting_ = false;
+    reconnect_attempts_ = 0;
 
     Read();
     ScheduleNextPing();
@@ -181,8 +260,7 @@ void WebsocketService::Read() {
             ws.async_read(buffer_,
                           [this](boost::system::error_code ec, std::size_t bytes_transferred) {
                               if (ec) {
-                                  ERROR_PRINT("Failed to read: %s", ec.message().c_str());
-                                  Disconnect();
+                                  HandleFailure("Failed to read: " + ec.message());
                                   return;
                               }
                               std::string req = beast::buffers_to_string(buffer_.data());
@@ -216,7 +294,12 @@ void WebsocketService::OnMessage(const std::string &req) {
         ice_server.urls = messageJson["urls"].get<std::vector<std::string>>();
         ice_server.username = messageJson["username"];
         ice_server.password = messageJson["credential"];
-        config.servers.push_back(ice_server);
+        // Skip empty ICE servers: a server with no URLs makes libwebrtc reject the
+        // whole RTCConfiguration ("Empty uri") and CreatePeer returns null. A LAN
+        // SFU advertises no STUN/TURN, so the join carries an empty urls array.
+        if (!ice_server.urls.empty()) {
+            config.servers.push_back(ice_server);
+        }
 
         pub_peer_ = CreatePeer(config);
         if (pub_peer_) {
@@ -248,7 +331,9 @@ void WebsocketService::OnMessage(const std::string &req) {
             Write("addAudioTrack", args_.uid);
         }
 
-        pub_peer_->CreateOffer();
+        if (pub_peer_) {
+            pub_peer_->CreateOffer();
+        }
 
     } else if (action == "offer" && sub_peer_) {
         sub_peer_->SetRemoteSdp(message, "offer");
@@ -318,16 +403,20 @@ void WebsocketService::DoWrite() {
         [this](auto &ws) {
             ws.async_write(net::buffer(write_queue_.front()),
                            [this](boost::system::error_code ec, std::size_t bytes_transferred) {
-                               std::lock_guard<std::mutex> lock(write_mutex_);
-                               if (ec) {
-                                   ERROR_PRINT("Failed to write: %s", ec.message().c_str());
-                                   Disconnect();
+                               bool failed = false;
+                               {
+                                   std::lock_guard<std::mutex> lock(write_mutex_);
+                                   if (ec) {
+                                       failed = true;
+                                   } else {
+                                       write_queue_.pop_front();
+                                       if (!write_queue_.empty()) {
+                                           DoWrite();
+                                       }
+                                   }
                                }
-
-                               write_queue_.pop_front();
-
-                               if (!write_queue_.empty()) {
-                                   DoWrite();
+                               if (failed) {
+                                   HandleFailure("Failed to write: " + ec.message());
                                }
                            });
         },

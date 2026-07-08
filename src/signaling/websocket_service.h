@@ -38,6 +38,7 @@ class WebsocketService : public SignalingService {
 
   private:
     Args args_;
+    net::io_context &ioc_;
     WebSocketVariant ws_;
     tcp::resolver resolver_;
     beast::flat_buffer buffer_;
@@ -46,8 +47,13 @@ class WebsocketService : public SignalingService {
     webrtc::scoped_refptr<RtcPeer> pub_peer_;
     webrtc::scoped_refptr<RtcPeer> sub_peer_;
     boost::asio::steady_timer ping_timer_;
+    boost::asio::steady_timer reconnect_timer_;
+    bool stopping_ = false;     // set on explicit Disconnect(): suppresses reconnect
+    bool reconnecting_ = false; // a reconnect is already scheduled
+    int reconnect_attempts_ = 0;
 
     WebSocketVariant InitWebSocket(net::io_context &ioc);
+    void RecreateWebSocket(); // rebuild ws_ in place for a reconnect attempt
     void OnResolve(beast::error_code ec, tcp::resolver::results_type results);
     void OnConnect(beast::error_code ec);
     void OnHandshake(beast::error_code ec);
@@ -56,6 +62,8 @@ class WebsocketService : public SignalingService {
     void OnMessage(const std::string &req);
     void OnRemoteIce(const std::string &message);
     void ScheduleNextPing();
+    void HandleFailure(const std::string &reason);
+    void ScheduleReconnect();
     void Read();
     void Write(const std::string &action, const std::string &message);
     void DoWrite();

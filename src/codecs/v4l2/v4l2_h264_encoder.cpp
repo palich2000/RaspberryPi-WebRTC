@@ -2,6 +2,7 @@
 #include "common/logging.h"
 #include "common/v4l2_frame_buffer.h"
 
+#include <api/array_view.h>
 #include <modules/video_coding/include/video_codec_interface.h>
 #include <modules/video_coding/include/video_error_codes.h>
 
@@ -86,6 +87,8 @@ void V4L2H264Encoder::SetRates(const RateControlParameters &parameters) {
     }
     bitrate_adjuster_.SetTargetBitrateBps(parameters.bitrate.get_sum_bps());
     fps_adjuster_ = parameters.framerate_fps;
+    // Store for the consolidated diagnostic logged in SendFrame (where QP is known).
+    cur_target_kbps_ = parameters.bitrate.get_sum_bps() / 1000;
 
     if (!encoder_) {
         return;
@@ -99,6 +102,25 @@ webrtc::VideoEncoder::EncoderInfo V4L2H264Encoder::GetEncoderInfo() const {
     info.supports_native_handle = true;
     info.is_hardware_accelerated = true;
     info.implementation_name = "Raspberry Pi V4L2 H264 Hardware Encoder";
+
+    // Advertise QP thresholds so libwebrtc runs the QualityScaler for this HW
+    // encoder. In MAINTAIN_FRAMERATE the QualityScaler is the ONLY thing that
+    // scales resolution back UP: it drops resolution when the encoded QP stays
+    // above the high threshold and raises it again when QP stays below the low one.
+    // Without this (the previous default), the scaler was kOff and the stream got
+    // stuck at a reduced resolution after a downward excursion. Requires SendFrame
+    // to fill encoded_image_.qp_ from the bitstream.
+    // low=33/high=42 (vs libwebrtc's H264 default 24/37): the upscale threshold is
+    // raised so a busy scene -- which sits around QP 29-31 at a reduced resolution
+    // even with plenty of bitrate -- clears the threshold and scales back up to full
+    // resolution (where QP lands ~35-37, below high=42 so it stays put, no
+    // oscillation), trading a slightly higher QP for the larger frame. Tune against
+    // footage.
+    info.scaling_settings = VideoEncoder::ScalingSettings(33, 42);
+    // HW encoders default to "QP not trusted", which makes libwebrtc fall back to a
+    // bandwidth-based scaler instead of the QP-based QualityScaler. We parse a real
+    // slice QP in SendFrame, so mark it trusted to engage the QP scaler.
+    info.is_qp_trusted = true;
     return info;
 }
 
@@ -122,6 +144,33 @@ void V4L2H264Encoder::SendFrame(const webrtc::VideoFrame &frame, V4L2Buffer &enc
     encoded_image_._frameType = encoded_buffer.flags & V4L2_BUF_FLAG_KEYFRAME
                                     ? webrtc::VideoFrameType::kVideoFrameKey
                                     : webrtc::VideoFrameType::kVideoFrameDelta;
+
+    // Extract the slice QP from the Annex-B bitstream and hand it to libwebrtc so
+    // the QualityScaler (enabled in GetEncoderInfo) can drive resolution up/down.
+    h264_bitstream_parser_.ParseBitstream(webrtc::MakeArrayView(
+        (const uint8_t *)encoded_buffer.start, encoded_buffer.length));
+    if (auto qp = h264_bitstream_parser_.GetLastSliceQp()) {
+        encoded_image_.qp_ = *qp;
+        last_qp_ = *qp;
+    }
+
+    // Consolidated diagnostic: one line only when QP, target bitrate, or fps shifts
+    // meaningfully -- shows scene-driven QP without per-frame spam.
+    int dqp = last_qp_ - last_logged_qp_;
+    if (dqp < 0) {
+        dqp = -dqp;
+    }
+    int dkbps = (int)cur_target_kbps_ - last_logged_kbps_;
+    if (dkbps < 0) {
+        dkbps = -dkbps;
+    }
+    if (dqp >= 2 || dkbps >= 25 || fps_adjuster_ != last_logged_fps_) {
+        last_logged_qp_ = last_qp_;
+        last_logged_kbps_ = cur_target_kbps_;
+        last_logged_fps_ = fps_adjuster_;
+        INFO_PRINT("encoder CC: target=%u kbps, fps=%d, res=%dx%d, qp=%d", cur_target_kbps_,
+                   fps_adjuster_, width_, height_, last_qp_);
+    }
 
     auto result = callback_->OnEncodedImage(encoded_image_, &codec_specific);
     if (result.error != webrtc::EncodedImageCallback::Result::OK) {

@@ -2,14 +2,19 @@
 
 // Linux
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <linux/videodev2.h>
+#include <sstream>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <thread>
+#include <vector>
 
 // WebRTC
 #include <modules/video_capture/video_capture_factory.h>
@@ -433,6 +438,102 @@ int V4L2Capturer::FindUsbCaptureDevice() {
     return -1;
 }
 
+void V4L2Capturer::PinUsbIrqToCpu(int cpu) {
+    if (cpu < 0) {
+        return; // feature disabled
+    }
+
+    auto is_digits = [](const std::string &s) {
+        return !s.empty() &&
+               std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
+    };
+
+    // 1) Resolve the active capture node's sysfs path and confirm it is on a USB
+    //    bus; pull out the bus id (e.g. "usb1").
+    std::string dev_link = "/sys/class/video4linux/video" + std::to_string(camera_id_);
+    std::error_code ec;
+    std::filesystem::path real = std::filesystem::canonical(dev_link, ec);
+    if (ec) {
+        INFO_PRINT("capture-cpu: cannot resolve %s (%s) - skipping USB IRQ pin", dev_link.c_str(),
+                   ec.message().c_str());
+        return;
+    }
+
+    std::string usb_bus; // e.g. "usb1"
+    for (const auto &part : real) {
+        const std::string s = part.string();
+        if (s.size() > 3 && s.compare(0, 3, "usb") == 0 && is_digits(s.substr(3))) {
+            usb_bus = s;
+            break;
+        }
+    }
+    if (usb_bus.empty()) {
+        INFO_PRINT("capture-cpu: /dev/video%d is not a USB camera (%s) - capture thread pinned to "
+                   "CPU%d, no IRQ to move",
+                   camera_id_, real.c_str(), cpu);
+        return;
+    }
+
+    // 2) Find the camera's USB host-controller IRQ in /proc/interrupts. The action
+    //    name is "xhci-hcd:usbN" (Pi5 RP1). Prefer an exact bus match; fall back to
+    //    the sole xhci line if there is only one.
+    std::ifstream irqs("/proc/interrupts");
+    if (!irqs.is_open()) {
+        INFO_PRINT("capture-cpu: cannot open /proc/interrupts - skipping USB IRQ pin");
+        return;
+    }
+    const std::string want = "xhci-hcd:" + usb_bus;
+    std::string line;
+    std::vector<std::string> exact_irqs, all_xhci_irqs; // MSI-X may give several vectors
+    while (std::getline(irqs, line)) {
+        if (line.find("xhci-hcd") == std::string::npos) {
+            continue;
+        }
+        std::istringstream ss(line);
+        std::string tok;
+        ss >> tok; // "<irq>:"
+        if (!tok.empty() && tok.back() == ':') {
+            tok.pop_back();
+        }
+        if (!is_digits(tok)) {
+            continue;
+        }
+        all_xhci_irqs.push_back(tok);
+        if (line.find(want) != std::string::npos) {
+            exact_irqs.push_back(tok);
+        }
+    }
+
+    // Prefer IRQs matching this camera's bus; fall back to the sole controller when
+    // there is exactly one xhci device and no per-bus name to match.
+    const std::vector<std::string> &irqs_to_pin =
+        !exact_irqs.empty() ? exact_irqs : (all_xhci_irqs.size() == 1 ? all_xhci_irqs : exact_irqs);
+    if (irqs_to_pin.empty()) {
+        INFO_PRINT("capture-cpu: no xhci-hcd IRQ matched %s in /proc/interrupts (%zu xhci lines) - "
+                   "skipping USB IRQ pin",
+                   usb_bus.c_str(), all_xhci_irqs.size());
+        return;
+    }
+
+    // 3) Pin each: echo <cpu> > /proc/irq/<irq>/smp_affinity_list
+    for (const std::string &irq : irqs_to_pin) {
+        const std::string path = "/proc/irq/" + irq + "/smp_affinity_list";
+        std::ofstream aff(path);
+        if (aff.is_open()) {
+            aff << cpu;
+            aff.flush();
+        }
+        if (!aff.is_open() || aff.fail()) {
+            ERROR_PRINT(
+                "capture-cpu: failed to write CPU%d to %s (need root?) - USB IRQ %s NOT pinned",
+                cpu, path.c_str(), irq.c_str());
+            continue;
+        }
+        INFO_PRINT("capture-cpu: pinned camera USB IRQ %s (%s) to CPU%d", irq.c_str(), want.c_str(),
+                   cpu);
+    }
+}
+
 bool V4L2Capturer::SetControls(int key, int value) { return V4L2Util::SetExtCtrl(fd_, key, value); }
 
 webrtc::scoped_refptr<webrtc::I420BufferInterface> V4L2Capturer::GetI420Frame(int stream_idx) {
@@ -456,8 +557,16 @@ void V4L2Capturer::StartCapture() {
 
     V4L2Util::StreamOn(fd_, capture_.type);
 
-    worker_ = std::make_unique<Worker>("V4L2 Capturer", [this]() {
-        CaptureImage();
-    });
+    // Isolate capture onto a dedicated core: move the camera's USB IRQ there, and
+    // pin the DQBUF worker to the same core (see --capture-cpu). Both are no-ops
+    // when capture_cpu < 0. The IRQ pin is best-effort (USB cameras / root only).
+    PinUsbIrqToCpu(config_.capture_cpu);
+
+    worker_ = std::make_unique<Worker>(
+        "V4L2 Capturer",
+        [this]() {
+            CaptureImage();
+        },
+        webrtc::ThreadPriority::kHigh, config_.capture_cpu);
     worker_->Run();
 }

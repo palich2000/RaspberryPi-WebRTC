@@ -82,6 +82,10 @@ class V4L2Capturer : public VideoCapturer {
     void CaptureImage();
     void HandleCaptureFailure(const char *reason);
     int FindUsbCaptureDevice();
+    // Best-effort: if the active /dev/videoN is a USB camera, find its USB
+    // host-controller IRQ and pin it to `cpu` (writes /proc/irq/<irq>/smp_affinity_list).
+    // No-op + warning on any failure (not USB, no root, unexpected sysfs/proc layout).
+    void PinUsbIrqToCpu(int cpu);
     void DrawDebugInfo(void *buffer);
     bool CheckMatchingDevice(std::string unique_name);
     int GetCameraIndex(webrtc::VideoCaptureModule::DeviceInfo *device_info);

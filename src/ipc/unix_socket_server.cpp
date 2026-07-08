@@ -1,5 +1,7 @@
 #include "ipc/unix_socket_server.h"
 
+#include <pthread.h>
+
 #include "common/logging.h"
 
 #include <boost/cerrno.hpp>
@@ -98,6 +100,7 @@ void UnixSocketServer::Stop() {
 }
 
 void UnixSocketServer::AcceptLoop() {
+    pthread_setname_np(pthread_self(), "ipc-accept");
     while (running_) {
         int client_fd = accept(server_fd_, nullptr, nullptr);
         if (client_fd < 0) {
@@ -117,6 +120,7 @@ void UnixSocketServer::AcceptLoop() {
 }
 
 void UnixSocketServer::HandleClient(int client_fd) {
+    pthread_setname_np(pthread_self(), "ipc-client");
     char buffer[1024];
     while (running_) {
         int n = read(client_fd, buffer, sizeof(buffer));

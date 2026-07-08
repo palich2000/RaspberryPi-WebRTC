@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <future>
 #include <mutex>
+#include <pthread.h>
 #include <thread>
 
 #include "common/logging.h"
@@ -77,6 +78,7 @@ void RecorderManager::StartRotationThread() {
     rotation_abort_.store(false);
     rotation_requested_.store(false);
     rotation_thread_ = std::thread([this]() {
+        pthread_setname_np(pthread_self(), "rec-rotation");
         while (true) {
             {
                 std::unique_lock<std::mutex> lock(rotation_mtx_);
@@ -349,6 +351,7 @@ void RecorderManager::MakePreviewImage(std::string path) {
     auto record_stream_idx = config.record_stream_idx;
     auto jpeg_quality = config.jpeg_quality;
     std::thread([video_src, path, record_stream_idx, jpeg_quality]() {
+        pthread_setname_np(pthread_self(), "rec-snapshot");
         std::this_thread::sleep_for(std::chrono::seconds(3));
         if (!video_src) {
             return;

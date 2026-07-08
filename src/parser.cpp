@@ -112,6 +112,12 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
         ("uid", bpo::value<std::string>(&args.uid)->default_value(args.uid),
             "The unique id to identify the device.")
         ("fps", bpo::value<int>(&args.fps)->default_value(args.fps), "Specify the camera frames per second.")
+        ("degradation", bpo::value<std::string>(&args.degradation)->default_value(args.degradation),
+            "Encoder degradation under congestion/CPU: balanced|resolution|framerate|disabled "
+            "(resolution = keep frame size, drop fps).")
+        ("max-bitrate", bpo::value<int>(&args.max_bitrate)->default_value(args.max_bitrate),
+            "Max encode bitrate in kbps for the video sender. 0 = libwebrtc default "
+            "(resolution-based, ~1700 for VGA).")
         ("width", bpo::value<int>(&args.width)->default_value(args.width), "Set camera frame width.")
         ("height", bpo::value<int>(&args.height)->default_value(args.height), "Set camera frame height.")
         ("rotation", bpo::value<int>(&args.rotation)->default_value(args.rotation),
@@ -124,6 +130,11 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
             "Recording stream index, 0: main stream, 1: sub stream")
         ("live-stream", bpo::value<int>(&args.live_stream_idx)->default_value(args.live_stream_idx),
             "Live stream index, 0: main stream, 1: sub stream")
+        ("capture-cpu", bpo::value<int>(&args.capture_cpu)->default_value(args.capture_cpu),
+            "Pin the UVC capture thread and the camera's USB IRQ to this CPU core to "
+            "isolate capture from I/O jitter (e.g. microSD writeback while recording). "
+            "-1 (default) disables pinning. USB cameras only. Best paired with kernel "
+            "isolcpus/irqaffinity on the same core.")
         ("sample-rate", bpo::value<int>(&args.sample_rate)->default_value(args.sample_rate),
             "Set the audio sample rate (in Hz).")
         ("no-audio", bpo::bool_switch(&args.no_audio)->default_value(args.no_audio), "Runs without audio source.")
@@ -228,6 +239,8 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
             "Use TLS for the WebSocket connection. Use it when connecting to a `wss://` URL.")
         ("ws-host", bpo::value<std::string>(&args.ws_host)->default_value(args.ws_host),
             "The WebSocket host address of the SFU server.")
+        ("ws-port", bpo::value<uint16_t>(&args.ws_port)->default_value(args.ws_port),
+            "The WebSocket port of the SFU server. 0 (default) uses 443 with TLS, otherwise 80.")
         ("ws-room", bpo::value<std::string>(&args.ws_room)->default_value(args.ws_room),
             "The room name to join on the SFU server.")
         ("ws-key", bpo::value<std::string>(&args.ws_key)->default_value(args.ws_key),

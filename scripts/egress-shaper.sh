@@ -19,6 +19,12 @@
 #   POLL             poll interval seconds         (default 2)
 #   SHAPE_UDP_ONLY   1 = shape only UDP (media),   (default 0 = shape all egress)
 #                    leaving TCP (ssh/mqtt) un-throttled
+#   QDISC_LIMIT      bytes of buffer under the shaped class (default 64kb).
+#                    A simple bfifo (drop-tail) is used, NOT fq_codel: the
+#                    camera's REMB-based control is loss-driven, so it needs a
+#                    moderate queue that builds then drops, giving a gradual loss
+#                    signal. fq_codel keeps the queue tiny and drops early, which
+#                    loss-based control can only sense as abrupt overshoot.
 set -u
 
 RATE_FILE="${RATE_FILE:-/run/pi-webrtc/egress_rate}"
@@ -26,6 +32,7 @@ IFACE="${IFACE:-$(ip route show default 2>/dev/null | awk '/default/ {print $5; 
 DEFAULT_RATE="${DEFAULT_RATE:-off}"
 POLL="${POLL:-2}"
 SHAPE_UDP_ONLY="${SHAPE_UDP_ONLY:-0}"
+QDISC_LIMIT="${QDISC_LIMIT:-64kb}"
 
 log() { echo "egress-shaper: $*"; }
 
@@ -52,7 +59,7 @@ apply_rate() {
         tc qdisc add dev "$IFACE" root handle 1: htb default 99 || return 1
         tc class add dev "$IFACE" parent 1: classid 1:10 htb rate "$rate" ceil "$rate" || return 1
         tc class add dev "$IFACE" parent 1: classid 1:99 htb rate 1000mbit ceil 1000mbit || return 1
-        tc qdisc add dev "$IFACE" parent 1:10 handle 10: fq_codel || return 1
+        tc qdisc add dev "$IFACE" parent 1:10 handle 10: bfifo limit "$QDISC_LIMIT" || return 1
         tc filter add dev "$IFACE" parent 1: protocol ip prio 1 \
             u32 match ip protocol 17 0xff flowid 1:10 || return 1
         tc filter add dev "$IFACE" parent 1: protocol ipv6 prio 2 \
@@ -62,7 +69,7 @@ apply_rate() {
         # Shape all egress on the interface through one rate-limited class.
         tc qdisc add dev "$IFACE" root handle 1: htb default 10 || return 1
         tc class add dev "$IFACE" parent 1: classid 1:10 htb rate "$rate" ceil "$rate" || return 1
-        tc qdisc add dev "$IFACE" parent 1:10 handle 10: fq_codel || return 1
+        tc qdisc add dev "$IFACE" parent 1:10 handle 10: bfifo limit "$QDISC_LIMIT" || return 1
         log "shaping $rate on $IFACE (all egress)"
     fi
 }

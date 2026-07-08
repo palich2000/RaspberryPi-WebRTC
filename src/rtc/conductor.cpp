@@ -1,5 +1,7 @@
 #include "rtc/conductor.h"
 
+#include <vector>
+
 #include <api/audio/builtin_audio_processing_builder.h>
 #include <api/audio_codecs/builtin_audio_decoder_factory.h>
 #include <api/audio_codecs/builtin_audio_encoder_factory.h>
@@ -30,6 +32,17 @@
 #include "common/utils.h"
 #include "rtc/custom_video_encoder_factory.h"
 #include "track/v4l2dma_track_source.h"
+
+static webrtc::DegradationPreference ParseDegradationPreference(const std::string &mode) {
+    if (mode == "resolution") {
+        return webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+    } else if (mode == "framerate") {
+        return webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+    } else if (mode == "disabled") {
+        return webrtc::DegradationPreference::DISABLED;
+    }
+    return webrtc::DegradationPreference::BALANCED;
+}
 
 std::shared_ptr<Conductor> Conductor::Create(Args args) {
     auto ptr = std::make_shared<Conductor>(args);
@@ -145,7 +158,12 @@ void Conductor::AddTracks(webrtc::scoped_refptr<webrtc::PeerConnectionInterface>
 
         auto video_sender_ = video_res.value();
         webrtc::RtpParameters parameters = video_sender_->GetParameters();
-        parameters.degradation_preference = webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+        parameters.degradation_preference = ParseDegradationPreference(args.degradation);
+        // Override the libwebrtc default max bitrate (resolution-based) so the
+        // encoder gets headroom above the ~1700kbps VGA cap when requested.
+        if (args.max_bitrate > 0 && !parameters.encodings.empty()) {
+            parameters.encodings[0].max_bitrate_bps = args.max_bitrate * 1000;
+        }
         video_sender_->SetParameters(parameters);
     }
 }
@@ -201,23 +219,26 @@ void Conductor::InitializeDataChannels(webrtc::scoped_refptr<RtcPeer> peer) {
     }
 
     if (args.enable_ipc) {
+        std::vector<std::shared_ptr<RtcChannel>> ipc_channels;
         switch (args.ipc_channel_mode) {
-            case ChannelMode::Lossy: {
-                auto lossy_channel = peer->CreateDataChannel(ChannelMode::Lossy);
-                BindIpcToDataChannel(lossy_channel);
+            case ChannelMode::Lossy:
+                ipc_channels.push_back(peer->CreateDataChannel(ChannelMode::Lossy));
                 break;
-            }
-            case ChannelMode::Reliable: {
-                auto reliable_channel = peer->CreateDataChannel(ChannelMode::Reliable);
-                BindIpcToDataChannel(reliable_channel);
+            case ChannelMode::Reliable:
+                ipc_channels.push_back(peer->CreateDataChannel(ChannelMode::Reliable));
                 break;
-            }
-            default: {
-                auto lossy_channel = peer->CreateDataChannel(ChannelMode::Lossy);
-                auto reliable_channel = peer->CreateDataChannel(ChannelMode::Reliable);
-                BindIpcToDataChannel(lossy_channel);
-                BindIpcToDataChannel(reliable_channel);
+            default:
+                ipc_channels.push_back(peer->CreateDataChannel(ChannelMode::Lossy));
+                ipc_channels.push_back(peer->CreateDataChannel(ChannelMode::Reliable));
                 break;
+        }
+        for (auto &channel : ipc_channels) {
+            BindIpcToDataChannel(channel);
+            // SFU peers get no command channel (below), so recording control
+            // rides the IPC channel: the SFU relays viewer START/STOP_RECORDING
+            // packets here and forwards the RecordingResponse back.
+            if (peer->isSfuPeer()) {
+                RegisterRecordingHandlers(channel);
             }
         }
     }
@@ -225,6 +246,44 @@ void Conductor::InitializeDataChannels(webrtc::scoped_refptr<RtcPeer> peer) {
     if (!peer->isSfuPeer()) {
         InitializeCommandChannel(peer);
     }
+}
+
+// Recording control: START/STOP handlers + current-state push on channel open.
+// Registered on the browser-facing command channel AND on the SFU IPC channels
+// (an SFU peer has no command channel, so recording control arrives over the
+// relayed IPC channel instead).
+void Conductor::RegisterRecordingHandlers(std::shared_ptr<RtcChannel> channel) {
+    if (!channel) {
+        return;
+    }
+    channel->RegisterHandler(
+        protocol::CommandType::START_RECORDING,
+        [this](std::shared_ptr<RtcChannel> datachannel, const protocol::Packet pkt) {
+            StartRecording(datachannel, pkt);
+        });
+    channel->RegisterHandler(
+        protocol::CommandType::STOP_RECORDING,
+        [this](std::shared_ptr<RtcChannel> datachannel, const protocol::Packet pkt) {
+            StopRecording(datachannel, pkt);
+        });
+
+    // Do NOT stop an on-demand recording when a peer disconnects: recording must
+    // survive page refreshes/reconnects and runs until an explicit STOP_RECORDING.
+    // Instead, when the channel opens, immediately report the current recording
+    // state so a new client's indicator is correct after a refresh.
+    channel->OnOpened([this](std::shared_ptr<RtcChannel> ch) {
+        auto recorder = ondemand_recorder_.lock();
+        if (!recorder) {
+            return;
+        }
+        protocol::RecordingResponse resp;
+        bool recording = recorder->is_recording();
+        resp.set_is_recording(recording);
+        if (recording) {
+            resp.set_filepath(recorder->current_filepath());
+        }
+        ch->Send(resp);
+    });
 }
 
 void Conductor::InitializeCommandChannel(webrtc::scoped_refptr<RtcPeer> peer) {
@@ -249,34 +308,7 @@ void Conductor::InitializeCommandChannel(webrtc::scoped_refptr<RtcPeer> peer) {
         [this](std::shared_ptr<RtcChannel> datachannel, const protocol::Packet pkt) {
             ControlCamera(datachannel, pkt);
         });
-    cmd_channel->RegisterHandler(
-        protocol::CommandType::START_RECORDING,
-        [this](std::shared_ptr<RtcChannel> datachannel, const protocol::Packet pkt) {
-            StartRecording(datachannel, pkt);
-        });
-    cmd_channel->RegisterHandler(
-        protocol::CommandType::STOP_RECORDING,
-        [this](std::shared_ptr<RtcChannel> datachannel, const protocol::Packet pkt) {
-            StopRecording(datachannel, pkt);
-        });
-
-    // НЕ зупиняємо on-demand запис при відключенні піра. Запис має переживати
-    // refresh сторінки / пере連'єднання і триває до явного STOP_RECORDING.
-    // Натомість, коли командний канал відкривається, одразу повідомляємо новому
-    // клієнту поточний стан запису - щоб індикатор був коректним після refresh.
-    cmd_channel->OnOpened([this](std::shared_ptr<RtcChannel> channel) {
-        auto recorder = ondemand_recorder_.lock();
-        if (!recorder) {
-            return;
-        }
-        protocol::RecordingResponse resp;
-        bool recording = recorder->is_recording();
-        resp.set_is_recording(recording);
-        if (recording) {
-            resp.set_filepath(recorder->current_filepath());
-        }
-        channel->Send(resp);
-    });
+    RegisterRecordingHandlers(cmd_channel);
 }
 
 void Conductor::TakeSnapshot(std::shared_ptr<RtcChannel> datachannel, const protocol::Packet &pkt) {
