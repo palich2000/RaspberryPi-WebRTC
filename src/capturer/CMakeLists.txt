@@ -7,6 +7,7 @@ set(CAPTURE_FILES
     pa_capturer.cpp
     alsa_capturer.cpp
     yuyv_clock.cpp
+    osd_overlay.cpp
 )
 
 if(USE_LIBARGUS_CAPTURE)

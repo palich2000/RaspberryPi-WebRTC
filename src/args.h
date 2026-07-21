@@ -162,6 +162,10 @@ struct Args {
     bool hw_accel = false;
     bool no_adaptive = false;
     bool no_clock = false; // disable the clock overlay on the stream (clock is on by default)
+    // OSD text overlay: a path glob (e.g. "/tmp/osd*"). Empty = disabled. When set,
+    // the glob's directory is watched via inotify and matching files' first lines
+    // are joined with " | " and drawn in the top-right corner of the stream.
+    std::string osd = "";
     std::string uid = "";
     std::string stun_url = "stun:stun.l.google.com:19302";
     std::string turn_url = "";

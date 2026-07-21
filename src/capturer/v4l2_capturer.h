@@ -7,6 +7,7 @@
 #include "capturer/video_capturer.h"
 #include "codecs/v4l2/v4l2_decoder.h"
 #include "common/interface/subject.h"
+#include "capturer/osd_overlay.h"
 #include "common/v4l2_frame_buffer.h"
 #include "common/v4l2_utils.h"
 #include "common/worker.h"
@@ -43,6 +44,8 @@ class V4L2Capturer : public VideoCapturer {
     bool hw_accel_;
     bool has_first_keyframe_;
     bool draw_clock_; // whether to draw the clock overlay on the stream (--no-clock disables it)
+    // OSD text overlay driven by files (see --osd). Null when --osd is empty.
+    std::unique_ptr<OsdOverlay> osd_;
     uint32_t format_;
     Args config_;
     // Consecutive capture failures (timeout / select error / DQBUF error).

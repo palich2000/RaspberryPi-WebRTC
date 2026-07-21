@@ -53,7 +53,11 @@ V4L2Capturer::V4L2Capturer(Args args)
       format_(args.format),
       config_(args),
       capture_failure_count_(0),
-      dropped_frame_count_(0) {}
+      dropped_frame_count_(0) {
+    if (!args.osd.empty()) {
+        osd_ = std::make_unique<OsdOverlay>(args.osd);
+    }
+}
 
 V4L2Capturer::~V4L2Capturer() {
     worker_.reset();
@@ -369,6 +373,10 @@ void V4L2Capturer::CaptureImage() {
             first_frame = false;
         }
         DrawDebugInfo((uint8_t *)capture_.buffers[buf.index].start);
+    }
+    if (osd_ && (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY)) {
+        osd_->Draw((uint8_t *)capture_.buffers[buf.index].start, width_, height_, width_ * 2,
+                   static_cast<yuv422_fmt_t>(format_));
     }
     if (hw_accel_ && IsCompressedFormat()) {
         if (!decoder_) {
