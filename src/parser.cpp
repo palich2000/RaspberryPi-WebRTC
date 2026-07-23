@@ -206,10 +206,13 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
         ("no-clock", bpo::bool_switch(&args.no_clock)->default_value(args.no_clock),
             "Disable the clock overlay drawn on the stream. The clock is enabled by default.")
         ("osd", bpo::value<std::string>(&args.osd)->default_value(args.osd),
-            "Enable an OSD text overlay in the top-right corner. Value is a path glob, "
-            "e.g. --osd=/tmp/osd*. The glob's directory is watched via inotify; files "
-            "whose basename matches the glob are read (first line each), sorted by name, "
-            "and joined with ' | '. Empty (default) disables the overlay.")
+            "Enable an OSD text overlay. Value is a path glob, e.g. --osd=/tmp/osd*. "
+            "The glob's directory is watched via inotify; files whose basename matches "
+            "the glob are read (first line each), sorted by name, and joined with ' | '. "
+            "An optional '*-position.txt' file in the same directory sets placement and "
+            "look via 'key value' lines: v_align top|bottom, h_align left|right, "
+            "v_offset/h_offset pixels, style box|box-semi|none|shadow, scale N. Defaults "
+            "to top-right, opaque box, scale 2. Empty (default) disables the overlay.")
         ("enable-ipc", bpo::bool_switch(&args.enable_ipc)->default_value(args.enable_ipc),
             "Enable IPC relay using a WebRTC DataChannel, lossy (UDP-like) or reliable (TCP-like) based on client preference.")
         ("ipc-channel",  bpo::value<std::string>(&args.ipc_channel)->default_value(args.ipc_channel),

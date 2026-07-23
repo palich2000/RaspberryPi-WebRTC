@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <poll.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
@@ -21,16 +22,76 @@
 
 namespace {
 
-// Rendering parameters (kept in sync with the clock overlay look).
-constexpr int kScale = 2;       // integer font scale
-constexpr uint8_t kYText = 235; // "white" luma in limited range
-constexpr uint8_t kAlpha = 255; // 255 = overwrite, <255 = blend
-constexpr int kNeutralUv = 1;   // force U/V=128 in touched pairs -> gray/white text
-constexpr int kPad = 10;        // padding inside the background box
-constexpr int kGlyphW = 8;      // font cell width
-constexpr int kGlyphH = 8;      // font cell height
-constexpr int kSpacing = 1;     // inter-glyph spacing in font pixels
+// Rendering parameters (kept in sync with the clock overlay look). The default
+// font scale (2) lives in OsdStyle::scale; the style file may override it.
+constexpr uint8_t kYText = 235;     // "white" luma in limited range
+constexpr uint8_t kYShadow = 16;    // "black" luma in limited range (drop shadow)
+constexpr uint8_t kAlpha = 255;     // 255 = overwrite, <255 = blend
+constexpr uint8_t kSemiAlpha = 128; // box-semi background blend strength (~50%)
+constexpr int kNeutralUv = 1;       // force U/V=128 in touched pairs -> gray/white text
+constexpr int kPad = 10;            // padding inside the background box
+constexpr int kGlyphW = 8;          // font cell width
+constexpr int kGlyphH = 8;          // font cell height
+constexpr int kSpacing = 1;         // inter-glyph spacing in font pixels
 constexpr size_t kMaxLineLen = 256;
+
+// Basename pattern for the style/position config file. It is parsed for the
+// render style and excluded from the OSD text itself.
+constexpr char kPositionGlob[] = "*-position.txt";
+
+// Concrete filename created (with defaults + inline help) when no matching
+// "*-position.txt" file exists yet, so the user has something to edit live.
+constexpr char kPositionDefaultName[] = "osd-position.txt";
+
+// Default style file body: current defaults plus one help line per parameter.
+// Written verbatim; parse_style_file() strips the '#' comments on read.
+constexpr char kPositionDefaultBody[] =
+    "# OSD overlay position and style. Edit live - changes apply immediately.\n"
+    "# '#' starts a comment (to end of line); unknown keys/values are ignored.\n"
+    "#\n"
+    "# v_align  vertical anchor:   top | bottom\n"
+    "# h_align  horizontal anchor: left | right\n"
+    "# v_offset pixels in from the anchored top/bottom edge\n"
+    "# h_offset pixels in from the anchored left/right edge\n"
+    "# style    box | box-semi | none | shadow\n"
+    "#            box      - opaque black box (default)\n"
+    "#            box-semi - semi-transparent black box\n"
+    "#            none     - text only, no background\n"
+    "#            shadow   - text with a dark drop shadow\n"
+    "# scale    integer font scale, 1..16\n"
+    "v_align top\n"
+    "h_align right\n"
+    "v_offset 0\n"
+    "h_offset 0\n"
+    "style box\n"
+    "scale 2\n";
+
+// Create `path` with the default style body if it does not exist. Uses
+// O_EXCL so a concurrent creator / an existing file is left untouched. Returns
+// true if the file exists afterwards (created now or already there), false on
+// a real I/O error worth warning about once.
+bool ensure_default_style_file(const std::string &path) {
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        if (errno == EEXIST)
+            return true; // someone else created it - fine
+        return false;
+    }
+    const char *p = kPositionDefaultBody;
+    size_t left = sizeof(kPositionDefaultBody) - 1; // exclude NUL
+    bool ok = true;
+    while (left > 0) {
+        ssize_t w = write(fd, p, left);
+        if (w <= 0) {
+            ok = false;
+            break;
+        }
+        p += w;
+        left -= (size_t)w;
+    }
+    close(fd);
+    return ok;
+}
 
 // Public-domain 8x8 font (font8x8_basic by Daniel Hepper). Bit 0 (LSB) is the
 // leftmost column of each 8-pixel row. Non-printable codes are left blank.
@@ -140,9 +201,18 @@ inline int clampi(int v, int lo, int hi) {
     return v;
 }
 
-// Fill a rectangle black (Y=0, U=V=128) in a packed YUV422 buffer.
+// Blend one channel byte toward `dst` by `alpha` (255 = full overwrite).
+inline uint8_t blend8(uint8_t src, uint8_t dst, uint8_t alpha) {
+    if (alpha == 255)
+        return dst;
+    return (uint8_t)(((255 - alpha) * (int)src + alpha * (int)dst + 127) / 255);
+}
+
+// Fill a rectangle black (Y=0, U=V=128) in a packed YUV422 buffer. `alpha`
+// controls the blend: 255 overwrites (opaque box), <255 darkens toward black
+// while keeping the underlying image visible (semi-transparent box).
 void fill_rect_black(uint8_t *buf, int width, int height, int stride, int x, int y, int w, int h,
-                     yuv422_fmt_t fmt) {
+                     yuv422_fmt_t fmt, uint8_t alpha) {
     if (!buf || width <= 0 || height <= 0 || stride <= 0 || w <= 0 || h <= 0)
         return;
 
@@ -163,15 +233,15 @@ void fill_rect_black(uint8_t *buf, int width, int height, int stride, int x, int
         for (int xx = ax0; xx < ax1; xx += 2) {
             uint8_t *p = row + xx * 2; // 4 bytes per 2 pixels
             if (fmt == FMT_YUYV) {     // [Y0 U Y1 V]
-                p[0] = 0;
-                p[1] = 128;
-                p[2] = 0;
-                p[3] = 128;
+                p[0] = blend8(p[0], 0, alpha);
+                p[1] = blend8(p[1], 128, alpha);
+                p[2] = blend8(p[2], 0, alpha);
+                p[3] = blend8(p[3], 128, alpha);
             } else { // UYVY: [U Y0 V Y1]
-                p[0] = 128;
-                p[1] = 0;
-                p[2] = 128;
-                p[3] = 0;
+                p[0] = blend8(p[0], 128, alpha);
+                p[1] = blend8(p[1], 0, alpha);
+                p[2] = blend8(p[2], 128, alpha);
+                p[3] = blend8(p[3], 0, alpha);
             }
         }
     }
@@ -208,7 +278,7 @@ inline void put_or_blend_Y(uint8_t *base, int stride, int x, int y, yuv422_fmt_t
 }
 
 void draw_glyph(uint8_t *img, int w, int h, int stride, int x0, int y0, yuv422_fmt_t fmt, char ch,
-                int scale) {
+                int scale, uint8_t luma) {
     const uint8_t *g = kFont8x8[(unsigned char)ch & 0x7F];
     for (int ry = 0; ry < kGlyphH; ry++) {
         uint8_t bits = g[ry];
@@ -225,7 +295,7 @@ void draw_glyph(uint8_t *img, int w, int h, int stride, int x0, int y0, yuv422_f
                     int xx = px + sx;
                     if ((unsigned)xx >= (unsigned)w)
                         continue;
-                    put_or_blend_Y(img, stride, xx, yy, fmt, kYText, kAlpha, kNeutralUv);
+                    put_or_blend_Y(img, stride, xx, yy, fmt, luma, kAlpha, kNeutralUv);
                 }
             }
         }
@@ -255,6 +325,108 @@ bool read_first_line(const std::string &path, std::string &out) {
     if (s.empty())
         return false;
     out = std::move(s);
+    return true;
+}
+
+// Lowercase an ASCII string in place.
+void ascii_tolower(std::string &s) {
+    for (char &c : s)
+        c = (char)tolower((unsigned char)c);
+}
+
+// Trim leading/trailing ASCII whitespace.
+std::string trim(const std::string &s) {
+    size_t a = 0, b = s.size();
+    while (a < b && isspace((unsigned char)s[a]))
+        a++;
+    while (b > a && isspace((unsigned char)s[b - 1]))
+        b--;
+    return s.substr(a, b - a);
+}
+
+// Parse the style/position file at `path` into `style` (starting from the
+// caller's defaults). Unknown keys/values are ignored so a partial or slightly
+// malformed file still applies what it can. Returns false only on I/O error.
+// Recognised `key value` lines (case-insensitive, '#' starts a comment):
+//   v_align  top|up | bottom|down
+//   h_align  left | right
+//   v_offset <pixels>
+//   h_offset <pixels>
+//   style    box | box-semi(semi) | none | shadow
+//   scale    <int >= 1>
+bool parse_style_file(const std::string &path, OsdStyle &style) {
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    // The style file is tiny; cap the read so a bad/huge file can't stall us.
+    char buf[1024];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n < 0)
+        return false;
+    buf[n > 0 ? n : 0] = '\0';
+
+    std::string content(buf);
+    size_t pos = 0;
+    while (pos <= content.size()) {
+        size_t nl = content.find('\n', pos);
+        std::string line =
+            content.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        pos = (nl == std::string::npos) ? content.size() + 1 : nl + 1;
+
+        // Drop comments and surrounding whitespace.
+        size_t hash = line.find('#');
+        if (hash != std::string::npos)
+            line = line.substr(0, hash);
+        line = trim(line);
+        if (line.empty())
+            continue;
+
+        // Split into key + value at the first whitespace run.
+        size_t sp = 0;
+        while (sp < line.size() && !isspace((unsigned char)line[sp]))
+            sp++;
+        std::string key = line.substr(0, sp);
+        std::string val = trim(line.substr(sp));
+        ascii_tolower(key);
+        ascii_tolower(val);
+        if (val.empty())
+            continue;
+
+        if (key == "v_align") {
+            if (val == "top" || val == "up")
+                style.v_align = OsdVAlign::Top;
+            else if (val == "bottom" || val == "down")
+                style.v_align = OsdVAlign::Bottom;
+        } else if (key == "h_align") {
+            if (val == "left")
+                style.h_align = OsdHAlign::Left;
+            else if (val == "right")
+                style.h_align = OsdHAlign::Right;
+        } else if (key == "v_offset") {
+            style.v_offset = (int)strtol(val.c_str(), nullptr, 10);
+        } else if (key == "h_offset") {
+            style.h_offset = (int)strtol(val.c_str(), nullptr, 10);
+        } else if (key == "style") {
+            if (val == "box")
+                style.bg = OsdBgMode::Box;
+            else if (val == "box-semi" || val == "semi")
+                style.bg = OsdBgMode::BoxSemi;
+            else if (val == "none")
+                style.bg = OsdBgMode::None;
+            else if (val == "shadow")
+                style.bg = OsdBgMode::Shadow;
+        } else if (key == "scale") {
+            int s = (int)strtol(val.c_str(), nullptr, 10);
+            if (s >= 1 && s <= 16)
+                style.scale = s;
+        }
+    }
+
+    if (style.v_offset < 0)
+        style.v_offset = 0;
+    if (style.h_offset < 0)
+        style.h_offset = 0;
     return true;
 }
 
@@ -316,7 +488,8 @@ void split_pattern(const std::string &pattern, std::string &dir, std::string &gl
 
 } // namespace
 
-OsdOverlay::OsdOverlay(const std::string &pattern) : running_(true) {
+OsdOverlay::OsdOverlay(const std::string &pattern)
+    : running_(true) {
     stop_pipe_[0] = stop_pipe_[1] = -1;
     split_pattern(pattern, dir_, glob_);
     if (pipe2(stop_pipe_, O_CLOEXEC) != 0) {
@@ -347,18 +520,26 @@ OsdOverlay::~OsdOverlay() {
 void OsdOverlay::Rescan() {
     DIR *d = opendir(dir_.c_str());
     if (!d) {
-        // Directory may not exist yet; clear the overlay and wait for it.
+        // Directory may not exist yet; clear the overlay and reset the style.
         std::lock_guard<std::mutex> lk(mtx_);
         text_.clear();
+        style_ = OsdStyle();
         return;
     }
 
-    std::vector<std::string> names;
+    std::vector<std::string> names;     // OSD text files (glob, not position)
+    std::vector<std::string> pos_names; // style/position files
     struct dirent *de;
     while ((de = readdir(d)) != nullptr) {
         if (de->d_name[0] == '.' &&
             (de->d_name[1] == '\0' || (de->d_name[1] == '.' && de->d_name[2] == '\0')))
             continue; // skip . and ..
+        // The style/position file is config, never OSD text - classify it first
+        // so it is excluded from the composed line even if it also matches glob_.
+        if (fnmatch(kPositionGlob, de->d_name, 0) == 0) {
+            pos_names.emplace_back(de->d_name);
+            continue;
+        }
         if (fnmatch(glob_.c_str(), de->d_name, 0) != 0)
             continue;
         names.emplace_back(de->d_name);
@@ -381,8 +562,30 @@ void OsdOverlay::Rescan() {
         composed += line;
     }
 
+    // Style defaults to the legacy look; the first position file by natural
+    // order (if any) overrides it. Parsing happens here, off the render path.
+    OsdStyle style;
+    if (!pos_names.empty()) {
+        std::sort(pos_names.begin(), pos_names.end(), natural_less);
+        parse_style_file(dir_ + "/" + pos_names.front(), style);
+    } else {
+        // No style file yet: drop a default one (with inline help) so the user
+        // can tweak it live. Its creation fires another inotify event, so the
+        // next Rescan will pick it up; we keep defaults for now. Warn at most
+        // once if the directory is not writable (watcher thread only, no lock).
+        std::string path = dir_ + "/" + kPositionDefaultName;
+        if (ensure_default_style_file(path)) {
+            create_warned_ = false;
+        } else if (!create_warned_) {
+            ERROR_PRINT("OSD: cannot create default style file '%s': %s", path.c_str(),
+                        strerror(errno));
+            create_warned_ = true;
+        }
+    }
+
     std::lock_guard<std::mutex> lk(mtx_);
     text_ = std::move(composed);
+    style_ = style;
 }
 
 void OsdOverlay::WatchLoop() {
@@ -473,33 +676,52 @@ void OsdOverlay::WatchLoop() {
 }
 
 void OsdOverlay::Draw(uint8_t *img, int width, int height, int stride, yuv422_fmt_t fmt) {
+    // Snapshot text + style under a short lock; all rendering is lock-free.
     std::string text;
+    OsdStyle style;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (text_.empty())
             return;
         text = text_;
+        style = style_;
     }
 
-    int cell = (kGlyphW + kSpacing) * kScale; // advance per character
-    int text_w = (int)text.size() * cell - kSpacing * kScale;
+    int scale = style.scale >= 1 ? style.scale : 1;
+    int cell = (kGlyphW + kSpacing) * scale; // advance per character
+    int text_w = (int)text.size() * cell - kSpacing * scale;
     if (text_w < 0)
         text_w = 0;
-    int text_h = kGlyphH * kScale;
+    int text_h = kGlyphH * scale;
 
-    int box_w = text_w + 2 * kPad;
-    int box_h = text_h + 2 * kPad;
-    int box_x = width - box_w;
+    // "None"/"Shadow" carry no box, so they need no padding around the text.
+    int pad = (style.bg == OsdBgMode::Box || style.bg == OsdBgMode::BoxSemi) ? kPad : 0;
+    int box_w = text_w + 2 * pad;
+    int box_h = text_h + 2 * pad;
+
+    // Anchor the box by alignment, then push in by the requested offset.
+    int box_x =
+        (style.h_align == OsdHAlign::Right) ? (width - box_w - style.h_offset) : style.h_offset;
+    int box_y =
+        (style.v_align == OsdVAlign::Bottom) ? (height - box_h - style.v_offset) : style.v_offset;
     if (box_x < 0)
         box_x = 0;
-    int box_y = 0;
+    if (box_y < 0)
+        box_y = 0;
 
-    fill_rect_black(img, width, height, stride, box_x, box_y, box_w, box_h, fmt);
+    if (style.bg == OsdBgMode::Box)
+        fill_rect_black(img, width, height, stride, box_x, box_y, box_w, box_h, fmt, kAlpha);
+    else if (style.bg == OsdBgMode::BoxSemi)
+        fill_rect_black(img, width, height, stride, box_x, box_y, box_w, box_h, fmt, kSemiAlpha);
 
-    int x = box_x + kPad;
-    int y = box_y + kPad;
+    int x = box_x + pad;
+    int y = box_y + pad;
     for (char ch : text) {
-        draw_glyph(img, width, height, stride, x, y, fmt, ch, kScale);
+        // Shadow mode: a dark glyph offset by one scaled pixel gives the text
+        // an edge so it stays readable without a background box.
+        if (style.bg == OsdBgMode::Shadow)
+            draw_glyph(img, width, height, stride, x + scale, y + scale, fmt, ch, scale, kYShadow);
+        draw_glyph(img, width, height, stride, x, y, fmt, ch, scale, kYText);
         x += cell;
     }
 }

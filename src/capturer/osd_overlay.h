@@ -3,10 +3,17 @@
 //
 // Watches a directory (via inotify) for files whose basename matches a glob
 // pattern, reads the first line of each matching file, joins the non-empty
-// lines with " | " and draws the result in the top-right corner of every
-// frame. The composed text is recomputed only when the watched files change
+// lines with " | " and draws the result over every frame. The composed text
+// AND the render style are recomputed only when the watched files change
 // (create / close-write / delete / move), so the per-frame Draw() call just
-// renders the cached string.
+// renders the cached string with the cached style - no per-frame parsing, so
+// no added latency on the hot path.
+//
+// Placement / look are read from an optional style file in the same watched
+// directory whose basename matches "*-position.txt" (kPositionGlob). That file
+// is parsed as `key value` lines and is itself excluded from the OSD text.
+// When absent, the default style reproduces the old behaviour exactly
+// (top-right, opaque box, scale 2, zero offset).
 //
 #pragma once
 
@@ -18,6 +25,38 @@
 #include <stdint.h>
 
 #include "yuyv_clock.h" // yuv422_fmt_t
+
+// Vertical / horizontal anchor for the OSD box.
+enum class OsdVAlign {
+    Top,
+    Bottom
+};
+enum class OsdHAlign {
+    Left,
+    Right
+};
+
+// Background / readability treatment behind the text.
+//   Box     - opaque black box (default, legacy look)
+//   BoxSemi - semi-transparent (blended) black box
+//   None    - no background, plain text
+//   Shadow  - no background, dark drop shadow under the text
+enum class OsdBgMode {
+    Box,
+    BoxSemi,
+    None,
+    Shadow
+};
+
+// Render style, refreshed off the hot path by the watcher thread.
+struct OsdStyle {
+    OsdVAlign v_align = OsdVAlign::Top;
+    OsdHAlign h_align = OsdHAlign::Right;
+    int v_offset = 0; // pixels from the aligned vertical edge
+    int h_offset = 0; // pixels from the aligned horizontal edge
+    OsdBgMode bg = OsdBgMode::Box;
+    int scale = 2; // integer font scale, >= 1
+};
 
 class OsdOverlay {
   public:
@@ -46,4 +85,10 @@ class OsdOverlay {
 
     std::mutex mtx_;
     std::string text_; // composed OSD line, guarded by mtx_
+    OsdStyle style_;   // render style, guarded by mtx_
+
+    // Set once we have failed to create the default style file, to avoid
+    // logging the same error on every rescan. Touched only in the watcher
+    // thread (Rescan), so it needs no lock.
+    bool create_warned_ = false;
 };
