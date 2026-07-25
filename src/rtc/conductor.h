@@ -45,6 +45,18 @@ class Conductor {
     void BindIpcToDataChannel(std::shared_ptr<RtcChannel> channel);
     void BindIpcToDataChannelSender(std::shared_ptr<RtcChannel> channel);
     void BindDataChannelToIpcReceiver(std::shared_ptr<RtcChannel> channel);
+    // Intercept a capture pause/resume command relayed by the SFU as CUSTOM JSON
+    //   {"cmd":"capture","active":true|false}
+    // before it is forwarded to the ipc_socket_client unix socket. Returns true
+    // when the message was a capture command (and must NOT be forwarded), false
+    // otherwise. Used for multi-camera single-active switching
+    // (see TWO_CAMERA_SWITCH_PLAN.md).
+    bool TryHandleCaptureCommand(const std::string &msg);
+    // Stamp this instance's capture device into a forwarded control request so
+    // ipc_socket_client (which may serve several cameras) targets the right V4L2
+    // node. Returns the message with a "video_dev" field added; passes it through
+    // unchanged when it is not a JSON object or already carries "video_dev".
+    std::string InjectControlDevice(const std::string &msg);
 
     void AddTracks(webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection);
     void TakeSnapshot(std::shared_ptr<RtcChannel> datachannel, const protocol::Packet &pkt);

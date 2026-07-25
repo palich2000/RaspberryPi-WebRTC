@@ -167,6 +167,15 @@ struct Args {
     // are joined with " | " and drawn in the top-right corner of the stream.
     std::string osd = "";
     std::string uid = "";
+    // Human-readable label for this camera instance, shown in the UI/viewer
+    // (e.g. "Front Left"). Distinct from `uid`, which is the routing identity
+    // used by the SFU to tell publishers apart in a shared room.
+    std::string camera_name = "";
+    // Bring up WebRTC/signaling but do NOT start camera capture on boot; wait for
+    // the SFU to send a resume/activate command before opening the device. Used
+    // for multi-camera single-active switching (see TWO_CAMERA_SWITCH_PLAN.md).
+    // Default false keeps the standalone behavior unchanged.
+    bool start_passive = false;
     std::string stun_url = "stun:stun.l.google.com:19302";
     std::string turn_url = "";
     std::string turn_username = "";

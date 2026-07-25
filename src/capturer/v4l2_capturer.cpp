@@ -25,6 +25,15 @@
 
 std::shared_ptr<V4L2Capturer> V4L2Capturer::Create(Args args) {
     auto ptr = std::make_shared<V4L2Capturer>(args);
+    if (args.start_passive) {
+        // Passive start: construct only. Do NOT open the device or start capture -
+        // the SFU will send a resume command (ResumeCapture) to activate this
+        // camera. Keeps the passive camera fully released (no fd, no DMA), which
+        // is required on Pi 5 where two raw captures cannot run at once. See
+        // TWO_CAMERA_SWITCH_PLAN.md.
+        INFO_PRINT("Capturer created in passive mode - waiting for a resume command.");
+        return ptr;
+    }
     // Patiently wait for a usable camera instead of crashing the process. The
     // bridge re-enumerates clean and broken in turns (corrupt UVC descriptor ->
     // bogus frame size); on a broken pass Initialize() returns false and we just
@@ -62,9 +71,16 @@ V4L2Capturer::V4L2Capturer(Args args)
 V4L2Capturer::~V4L2Capturer() {
     worker_.reset();
     decoder_.reset();
+    // If we are paused (StopCapture already released the device) or were created
+    // in passive mode, fd_ < 0 and the buffers are gone - do not double-free them
+    // or ioctl a closed descriptor.
+    if (fd_ < 0) {
+        return;
+    }
     V4L2Util::StreamOff(fd_, capture_.type);
     V4L2Util::DeallocateBuffer(fd_, &capture_);
     V4L2Util::CloseDevice(fd_);
+    fd_ = -1;
 }
 
 void V4L2Capturer::CloseFd() {
@@ -355,6 +371,11 @@ void V4L2Capturer::CaptureImage() {
         return;
     }
 
+    if (log_first_frame_after_resume_.exchange(false, std::memory_order_relaxed)) {
+        INFO_PRINT("First frame delivered after resume on /dev/video%d (bytesused=%u).", camera_id_,
+                   buf.bytesused);
+    }
+
     auto buffer = V4L2Buffer::FromV4L2((uint8_t *)capture_.buffers[buf.index].start, buf, format_);
     frame_buffer_ = V4L2FrameBuffer::Create(width_, height_, buffer);
     if (hw_accel_ && format_ == V4L2_PIX_FMT_H264) {
@@ -553,13 +574,12 @@ Subscription V4L2Capturer::Subscribe(Subject<V4L2FrameBufferRef>::Callback callb
     return stream_subject_.Subscribe(std::move(callback));
 }
 
-void V4L2Capturer::StartCapture() {
-    if (!V4L2Util::AllocateBuffer(fd_, &capture_, buffer_count_) ||
-        !V4L2Util::QueueBuffers(fd_, &capture_)) {
-        // Should be rare now that Initialize() validates the frame size, but if
-        // REQBUFS still fails exit non-zero so systemd restarts (and Create()'s
-        // retry loop runs again) instead of exiting 0 and looking successful.
-        ERROR_PRINT("Failed to allocate/queue capture buffers - exiting for restart");
+void V4L2Capturer::StartStreaming() {
+    // Buffers must already be allocated (AllocateBuffer) - the first start does it
+    // in StartCapture, and resume-from-pause reuses the buffers kept mapped across
+    // the pause. Here we only queue them, start the stream, and spawn the worker.
+    if (!V4L2Util::QueueBuffers(fd_, &capture_)) {
+        ERROR_PRINT("Failed to queue capture buffers - exiting for restart");
         exit(EXIT_FAILURE);
     }
 
@@ -577,4 +597,86 @@ void V4L2Capturer::StartCapture() {
         },
         webrtc::ThreadPriority::kHigh, config_.capture_cpu);
     worker_->Run();
+}
+
+void V4L2Capturer::StartCapture() {
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+    if (capturing_) {
+        DEBUG_PRINT("StartCapture ignored: already capturing.");
+        return;
+    }
+    // First start after Initialize(): allocate the MMAP buffers, then stream.
+    if (!V4L2Util::AllocateBuffer(fd_, &capture_, buffer_count_)) {
+        // Rare now that Initialize() validates the frame size; if REQBUFS still
+        // fails, exit non-zero so systemd restarts instead of looking successful.
+        ERROR_PRINT("Failed to allocate capture buffers - exiting for restart");
+        exit(EXIT_FAILURE);
+    }
+    StartStreaming();
+    capturing_ = true;
+}
+
+void V4L2Capturer::StopCapture() {
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+    if (!capturing_) {
+        INFO_PRINT("StopCapture ignored: not capturing (already paused) - command was a no-op.");
+        return;
+    }
+    // Stop the capture worker first: ~Worker() joins the thread, so once this
+    // returns nothing produces new frames.
+    worker_.reset();
+    // STREAMOFF stops the DMA/capture, which is what frees the Pi 5 memory-bus
+    // budget while this camera is passive. Deliberately do NOT munmap the buffers
+    // or close the device: the last zero-copy frame just handed to the encoder
+    // still points INTO these mmap'd buffers, and the software encoder reads it
+    // asynchronously (ToI420 on the encoder thread) - munmapping here is a
+    // use-after-free that SIGSEGVs (reliably on 1080p, where encode is slower).
+    // The buffers and fd are kept and reused by ResumeCapture; munmap happens only
+    // in the destructor at process shutdown.
+    V4L2Util::StreamOff(fd_, capture_.type);
+    // Reset transient per-session state so a later ResumeCapture() starts clean.
+    capture_failure_count_ = 0;
+    has_first_keyframe_ = false;
+    capturing_ = false;
+    INFO_PRINT("Capture paused: STREAMOFF on /dev/video%d (device kept open).", camera_id_);
+}
+
+void V4L2Capturer::ResumeCapture() {
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+    if (capturing_) {
+        INFO_PRINT("ResumeCapture ignored: already capturing - command was a no-op.");
+        return;
+    }
+    if (fd_ < 0) {
+        // First activation (e.g. --start-passive) or after a full teardown: open +
+        // configure the device, retrying a bad USB re-enumeration like Create(),
+        // then allocate buffers. NOTE: the Initialize loop can block while the
+        // device comes back - the SFU wiring calls ResumeCapture off the signaling
+        // thread so it does not stall other peers.
+        int backoff_s = kInitBackoffMinSec;
+        while (!Initialize()) {
+            INFO_PRINT("Resume: camera not ready (no node / bad enumeration) - retrying in %ds.",
+                       backoff_s);
+            std::this_thread::sleep_for(std::chrono::seconds(backoff_s));
+            backoff_s = std::min(backoff_s * 2, kInitBackoffMaxSec);
+        }
+        if (!V4L2Util::AllocateBuffer(fd_, &capture_, buffer_count_)) {
+            ERROR_PRINT("Resume: failed to allocate capture buffers - exiting for restart");
+            exit(EXIT_FAILURE);
+        }
+    }
+    // Buffers are allocated (kept mapped from the pause, or just allocated above);
+    // re-queue them, STREAMON, and restart the worker.
+    // Diagnostics: log when the first frame after resume actually arrives, so a
+    // "resumed but no frames" device flake is distinguishable from a no-op.
+    log_first_frame_after_resume_.store(true, std::memory_order_relaxed);
+    StartStreaming();
+    capturing_ = true;
+    INFO_PRINT("Capture resumed on /dev/video%d - waiting for first frame.", camera_id_);
+}
+
+std::string V4L2Capturer::device_path() const {
+    // camera_id_ tracks the live node, including a runtime USB re-enumeration
+    // (see FindUsbCaptureDevice), so this always names the node in use right now.
+    return "/dev/video" + std::to_string(camera_id_);
 }

@@ -3,6 +3,9 @@
 
 #include <modules/video_capture/video_capture.h>
 
+#include <atomic>
+#include <mutex>
+
 #include "args.h"
 #include "capturer/video_capturer.h"
 #include "codecs/v4l2/v4l2_decoder.h"
@@ -28,6 +31,9 @@ class V4L2Capturer : public VideoCapturer {
 
     bool SetControls(int key, int value) override;
     void StartCapture() override;
+    void StopCapture() override;
+    void ResumeCapture() override;
+    std::string device_path() const override;
 
     webrtc::scoped_refptr<webrtc::I420BufferInterface> GetI420Frame(int stream_idx = 0) override;
     Subscription Subscribe(Subject<V4L2FrameBufferRef>::Callback callback,
@@ -80,7 +86,23 @@ class V4L2Capturer : public VideoCapturer {
     // bogus negotiated frame size) so Create() can back off and retry. Only
     // genuine config errors (e.g. software H264) still exit().
     bool Initialize();
+    // Queue the (already allocated) buffers, StreamOn, pin IRQ, and spawn the
+    // capture worker. Shared by StartCapture() (first start, which allocates the
+    // buffers first) and ResumeCapture() (reuses the buffers kept across a pause).
+    void StartStreaming();
     void CloseFd();
+
+    // Serializes StartCapture/StopCapture/ResumeCapture (invoked from the WebRTC/
+    // signaling thread) against each other. The capture loop runs on `worker_`;
+    // StopCapture joins it before touching fd_, so fd_ access stays single-threaded.
+    std::mutex capture_mutex_;
+    // True while the device is open and the capture worker is running. Guards
+    // against double start/stop/resume.
+    bool capturing_ = false;
+    // Set by ResumeCapture(), cleared by CaptureImage() when the first frame
+    // after a resume is delivered - purely for diagnostics (distinguishes a
+    // dropped/no-op resume from a device that resumed but never delivered).
+    std::atomic<bool> log_first_frame_after_resume_{false};
     bool IsCompressedFormat() const;
     void CaptureImage();
     void HandleCaptureFailure(const char *reason);

@@ -111,6 +111,12 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
             "The input format (`i420`, `yuyv`, `uyvy`, `mjpeg`, `h264`) of the V4L2 camera.")
         ("uid", bpo::value<std::string>(&args.uid)->default_value(args.uid),
             "The unique id to identify the device.")
+        ("camera-name", bpo::value<std::string>(&args.camera_name)->default_value(args.camera_name),
+            "Human-readable label for this camera shown in the UI (e.g. \"Front Left\"). "
+            "Distinct from --uid, which is the routing identity.")
+        ("start-passive", bpo::bool_switch(&args.start_passive)->default_value(args.start_passive),
+            "Bring up WebRTC/signaling but do NOT start camera capture until the SFU "
+            "sends a resume command. For multi-camera single-active switching.")
         ("fps", bpo::value<int>(&args.fps)->default_value(args.fps), "Specify the camera frames per second.")
         ("degradation", bpo::value<std::string>(&args.degradation)->default_value(args.degradation),
             "Encoder degradation under congestion/CPU: balanced|resolution|framerate|disabled "

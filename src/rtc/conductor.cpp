@@ -1,6 +1,9 @@
 #include "rtc/conductor.h"
 
+#include <thread>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include <api/audio/builtin_audio_processing_builder.h>
 #include <api/audio_codecs/builtin_audio_decoder_factory.h>
@@ -575,8 +578,68 @@ void Conductor::BindDataChannelToIpcReceiver(std::shared_ptr<RtcChannel> channel
         return;
 
     channel->RegisterHandler([this](const std::string &msg) {
-        ipc_server_->Write(msg);
+        // Capture pause/resume commands relayed by the SFU are handled here and
+        // NOT forwarded to the camera-control unix socket. Everything else (the
+        // viewer's get/set/calibrate JSON) is forwarded as before.
+        if (TryHandleCaptureCommand(msg)) {
+            return;
+        }
+        ipc_server_->Write(InjectControlDevice(msg));
     });
     DEBUG_PRINT("DataChannel (%s) connected to IPC server for receiving.",
                 channel->label().c_str());
+}
+
+bool Conductor::TryHandleCaptureCommand(const std::string &msg) {
+    // {"cmd":"capture","active":true|false}. Parse without throwing - most
+    // messages here are unrelated camera-control JSON and must be forwarded.
+    auto j = nlohmann::json::parse(msg, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) {
+        return false;
+    }
+    auto cmd = j.find("cmd");
+    if (cmd == j.end() || !cmd->is_string() || cmd->get<std::string>() != "capture") {
+        return false;
+    }
+
+    bool active = j.value("active", true);
+    auto capturer = video_capture_source_; // keep it alive for the async call
+    if (!capturer) {
+        INFO_PRINT("Capture command '%s' ignored: no video source.", active ? "resume" : "pause");
+        return true;
+    }
+
+    // Run off the DataChannel/signaling thread: ResumeCapture() reacquires the
+    // device and can block while it re-initializes. The capturer serializes
+    // start/stop/resume internally, so concurrent commands are safe.
+    INFO_PRINT("Capture command received: %s.", active ? "resume" : "pause");
+    std::thread([capturer, active]() {
+        if (active) {
+            capturer->ResumeCapture();
+        } else {
+            capturer->StopCapture();
+        }
+    }).detach();
+    return true;
+}
+
+std::string Conductor::InjectControlDevice(const std::string &msg) {
+    // pi-webrtc is the single source of truth for its own capture device, so it
+    // stamps "video_dev" into every forwarded control request. This lets one
+    // ipc_socket_client serve several cameras (route by device) and keeps the
+    // target correct across a runtime USB re-enumeration. Requests that are not
+    // JSON objects, or already carry "video_dev", pass through untouched.
+    std::string dev;
+    if (video_capture_source_) {
+        dev = video_capture_source_->device_path();
+    }
+    if (dev.empty()) {
+        return msg;
+    }
+    auto j = nlohmann::json::parse(msg, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object() || j.contains("video_dev")) {
+        return msg;
+    }
+    j["video_dev"] = dev;
+    return j.dump();
 }
