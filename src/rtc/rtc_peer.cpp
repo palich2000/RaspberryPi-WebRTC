@@ -151,6 +151,10 @@ void RtcPeer::SetOnDataChannelCallback(OnRtcChannelCallback callback) {
     on_data_channel_ = std::move(callback);
 }
 
+void RtcPeer::SetOnStateChangeCallback(OnStateChangeCallback callback) {
+    on_state_change_ = std::move(callback);
+}
+
 void RtcPeer::OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState new_state) {
     signaling_state_ = new_state;
     auto state = webrtc::PeerConnectionInterface::AsString(new_state);
@@ -226,6 +230,10 @@ void RtcPeer::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnection
     } else if (new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kClosed) {
         is_connected_.store(false);
         is_complete_.store(true);
+    }
+
+    if (on_state_change_) {
+        on_state_change_(new_state);
     }
 }
 

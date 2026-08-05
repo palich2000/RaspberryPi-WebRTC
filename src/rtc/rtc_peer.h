@@ -101,6 +101,8 @@ class RtcPeer : public webrtc::PeerConnectionObserver,
                 public SignalingMessageObserver {
   public:
     using OnRtcChannelCallback = std::function<void(std::shared_ptr<RtcChannel>)>;
+    using OnStateChangeCallback =
+        std::function<void(webrtc::PeerConnectionInterface::PeerConnectionState)>;
 
     static webrtc::scoped_refptr<RtcPeer> Create(PeerConfig config);
 
@@ -120,6 +122,11 @@ class RtcPeer : public webrtc::PeerConnectionObserver,
     std::shared_ptr<RtcChannel> CreateDataChannel(ChannelMode mode);
     std::string RestartIce(std::string ice_ufrag, std::string ice_pwd);
     void SetOnDataChannelCallback(OnRtcChannelCallback callback);
+    // Notified on every PeerConnectionState transition. A signaling service needs
+    // this to react to a dead peer: with an SFU the media path can fail while the
+    // signaling socket stays nominally up, so nothing else would ever notice.
+    // Invoked on a libwebrtc thread - post to your own loop before touching state.
+    void SetOnStateChangeCallback(OnStateChangeCallback callback);
 
     // SignalingMessageObserver implementation.
     void SetRemoteSdp(const std::string &sdp, const std::string &type) override;
@@ -171,6 +178,7 @@ class RtcPeer : public webrtc::PeerConnectionObserver,
     std::unique_ptr<webrtc::SessionDescriptionInterface> modified_desc_;
 
     OnRtcChannelCallback on_data_channel_;
+    OnStateChangeCallback on_state_change_;
     std::shared_ptr<RtcChannel> cmd_channel_;
     std::shared_ptr<RtcChannel> lossy_channel_;
     std::shared_ptr<RtcChannel> reliable_channel_;

@@ -311,6 +311,23 @@ void WebsocketService::OnMessage(const std::string &req) {
                                          int sdp_mline_index, const std::string &candidate) {
                 Write("tricklePublisher", candidate);
             });
+            // The publisher peer carries all the media. When ICE/DTLS gives up, the
+            // signaling TCP can stay nominally open for a long time (kernel
+            // retransmits ride out the outage, and our pings just queue), so a
+            // socket error - the only thing that would otherwise trigger a
+            // reconnect - never arrives and this camera streams into a black hole
+            // until something restarts it. Take the same teardown+reconnect path.
+            pub_peer_->SetOnStateChangeCallback(
+                [this](webrtc::PeerConnectionInterface::PeerConnectionState state) {
+                    if (state != webrtc::PeerConnectionInterface::PeerConnectionState::kFailed) {
+                        return;
+                    }
+                    // Called on a libwebrtc thread: hop to the io_context, which owns
+                    // the socket, the timers and pub_peer_ itself.
+                    net::post(ioc_, [this]() {
+                        HandleFailure("Publisher peer connection failed");
+                    });
+                });
         }
 
         config.is_publisher = false;
