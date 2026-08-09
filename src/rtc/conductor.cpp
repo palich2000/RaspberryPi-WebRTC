@@ -167,6 +167,13 @@ void Conductor::AddTracks(webrtc::scoped_refptr<webrtc::PeerConnectionInterface>
         if (args.max_bitrate > 0 && !parameters.encodings.empty()) {
             parameters.encodings[0].max_bitrate_bps = args.max_bitrate * 1000;
         }
+        // Hard ceiling on the encoded framerate. libwebrtc propagates it into the
+        // sink wants, so ScaleTrackSource::AdaptFrame drops the surplus frames
+        // before they ever reach the encoder - independent of what the camera
+        // delivers and of whether the degradation heuristic feels like adapting.
+        if (args.max_framerate > 0 && !parameters.encodings.empty()) {
+            parameters.encodings[0].max_framerate = args.max_framerate;
+        }
         video_sender_->SetParameters(parameters);
     }
 }

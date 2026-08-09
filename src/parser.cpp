@@ -124,6 +124,10 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
         ("max-bitrate", bpo::value<int>(&args.max_bitrate)->default_value(args.max_bitrate),
             "Max encode bitrate in kbps for the video sender. 0 = libwebrtc default "
             "(resolution-based, ~1700 for VGA).")
+        ("max-framerate", bpo::value<int>(&args.max_framerate)->default_value(args.max_framerate),
+            "Hard cap on the ENCODED framerate, 0 = no cap. Unlike --fps (a request the "
+            "camera may ignore) this drops surplus frames before the encoder, so a thin "
+            "uplink spends its bitrate on fewer, better frames.")
         ("width", bpo::value<int>(&args.width)->default_value(args.width), "Set camera frame width.")
         ("height", bpo::value<int>(&args.height)->default_value(args.height), "Set camera frame height.")
         ("rotation", bpo::value<int>(&args.rotation)->default_value(args.rotation),

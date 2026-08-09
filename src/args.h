@@ -90,6 +90,18 @@ struct Args {
     // upscale resolution back up after a downward excursion.
     int max_bitrate = 0;
 
+    // max encoded framerate applied to the video sender's RtpParameters; 0 = no
+    // cap. This is NOT --fps: --fps is a VIDIOC_S_PARM request that most UVC
+    // cameras ignore, so the source keeps delivering its fixed rate (52fps on the
+    // bench camera) whatever it says. This one is a hard ceiling libwebrtc pushes
+    // into the sink wants, and AdaptFrame drops the surplus frames before the
+    // encoder. Needed because the degradation preference is a heuristic that
+    // OSCILLATES on a thin uplink: measured over the tunnel, the encoder held
+    // 15-18fps about half the time and let the full ~52 through the rest, and each
+    // of those excursions collapses the per-frame budget (9 kbit/frame at 500kbps)
+    // and triggers the loss/PLI/keyframe cycle.
+    int max_framerate = 0;
+
     // sub stream for multiple resolution capture
     int sub_width = 0;
     int sub_height = 0;
