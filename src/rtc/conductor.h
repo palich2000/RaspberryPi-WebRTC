@@ -52,6 +52,16 @@ class Conductor {
     // otherwise. Used for multi-camera single-active switching
     // (see TWO_CAMERA_SWITCH_PLAN.md).
     bool TryHandleCaptureCommand(const std::string &msg);
+    // Route a CUSTOM JSON command carrying a "plugin" field to the matching
+    // dlopen()'d OSD plugin on the active capturer (see
+    // capturer/osd_plugin_loader.h). Returns true when the message carried a
+    // "plugin" field at all (so it must NOT be forwarded elsewhere) - in that
+    // case a JSON reply is ALWAYS sent back over `channel`, either the
+    // plugin's own response or an explicit {"ok":false,...} when no plugin
+    // with that name is loaded, so the caller never has to guess whether the
+    // command took effect. Returns false when the message carries no "plugin"
+    // field at all (not plugin-related, falls through to normal handling).
+    bool TryHandleOsdPluginCommand(std::shared_ptr<RtcChannel> channel, const std::string &msg);
     // Stamp this instance's capture device into a forwarded control request so
     // ipc_socket_client (which may serve several cameras) targets the right V4L2
     // node. Returns the message with a "video_dev" field added; passes it through

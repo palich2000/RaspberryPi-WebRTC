@@ -11,6 +11,7 @@
 #include "codecs/v4l2/v4l2_decoder.h"
 #include "common/interface/subject.h"
 #include "capturer/osd_overlay.h"
+#include "capturer/osd_plugin_loader.h"
 #include "common/v4l2_frame_buffer.h"
 #include "common/v4l2_utils.h"
 #include "common/worker.h"
@@ -30,6 +31,8 @@ class V4L2Capturer : public VideoCapturer {
     Args config() const override;
 
     bool SetControls(int key, int value) override;
+    bool TryOsdPluginCommand(const std::string &plugin_name, const std::string &request_json,
+                             std::string *response_json) override;
     void StartCapture() override;
     void StopCapture() override;
     void ResumeCapture() override;
@@ -52,6 +55,10 @@ class V4L2Capturer : public VideoCapturer {
     bool draw_clock_; // whether to draw the clock overlay on the stream (--no-clock disables it)
     // OSD text overlay driven by files (see --osd). Null when --osd is empty.
     std::unique_ptr<OsdOverlay> osd_;
+    // dlopen()'d OSD plugins (see --osd-plugin / osd_plugin_loader.h). Drawn in
+    // CaptureImage() alongside osd_; driven live via IPC DataChannel commands
+    // routed by Conductor::TryHandleOsdPluginCommand -> TryOsdPluginCommand().
+    std::vector<std::unique_ptr<LoadedOsdPlugin>> osd_plugins_;
     uint32_t format_;
     Args config_;
     // Consecutive capture failures (timeout / select error / DQBUF error).

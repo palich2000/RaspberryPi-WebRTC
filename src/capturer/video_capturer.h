@@ -35,6 +35,18 @@ class VideoCapturer {
     virtual std::string device_path() const { return ""; }
     virtual webrtc::scoped_refptr<webrtc::I420BufferInterface> GetI420Frame(int stream_idx = 0) = 0;
     virtual bool SetControls(int key, int value) { return false; };
+    // Routes a JSON command to a loaded OSD plugin (see osd_plugin_loader.h)
+    // whose declared name equals `plugin_name`. Returns true and fills
+    // *response_json (the plugin's own reply, or a synthesized {"ok":true} if
+    // the plugin returned nothing) when a matching plugin handled the command
+    // (so the caller must NOT forward it elsewhere). Returns false when no
+    // such plugin is loaded - the caller must still answer the request itself
+    // in that case, never leave it unanswered. Default no-op for capturers
+    // that don't support OSD plugins.
+    virtual bool TryOsdPluginCommand(const std::string &plugin_name, const std::string &request_json,
+                                     std::string *response_json) {
+        return false;
+    }
     virtual Subscription Subscribe(Subject<V4L2FrameBufferRef>::Callback callback,
                                    int stream_idx = 0) = 0;
 };

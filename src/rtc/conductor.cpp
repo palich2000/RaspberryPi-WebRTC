@@ -584,10 +584,16 @@ void Conductor::BindDataChannelToIpcReceiver(std::shared_ptr<RtcChannel> channel
     if (!channel || !ipc_server_)
         return;
 
-    channel->RegisterHandler([this](const std::string &msg) {
-        // Capture pause/resume commands relayed by the SFU are handled here and
-        // NOT forwarded to the camera-control unix socket. Everything else (the
-        // viewer's get/set/calibrate JSON) is forwarded as before.
+    channel->RegisterHandler([this, channel](const std::string &msg) {
+        // OSD plugin commands (carry a "plugin" field matching a loaded
+        // --osd-plugin) and capture pause/resume commands relayed by the SFU
+        // are handled here and NOT forwarded to the camera-control unix
+        // socket. Everything else (the viewer's get/set/calibrate JSON, and
+        // device-plugin "domain" commands handled downstream by
+        // ipc_socket_client) is forwarded as before.
+        if (TryHandleOsdPluginCommand(channel, msg)) {
+            return;
+        }
         if (TryHandleCaptureCommand(msg)) {
             return;
         }
@@ -595,6 +601,38 @@ void Conductor::BindDataChannelToIpcReceiver(std::shared_ptr<RtcChannel> channel
     });
     DEBUG_PRINT("DataChannel (%s) connected to IPC server for receiving.",
                 channel->label().c_str());
+}
+
+bool Conductor::TryHandleOsdPluginCommand(std::shared_ptr<RtcChannel> channel, const std::string &msg) {
+    // {"plugin":"<name>",...}. Parse without throwing - most messages here are
+    // unrelated camera-control JSON and must be forwarded.
+    auto j = nlohmann::json::parse(msg, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) {
+        return false;
+    }
+    auto plugin = j.find("plugin");
+    if (plugin == j.end() || !plugin->is_string()) {
+        return false;
+    }
+    std::string name = plugin->get<std::string>();
+
+    // The whole message is passed through as-is; the plugin owns its own JSON
+    // schema. Once a message declares a "plugin" it is claimed here for good -
+    // it must NEVER silently vanish, so every branch below sends a reply.
+    auto capturer = video_capture_source_;
+    std::string response;
+    bool handled = capturer && capturer->TryOsdPluginCommand(name, msg, &response);
+    if (!handled) {
+        nlohmann::json err;
+        err["ok"] = false;
+        err["plugin"] = name;
+        err["error"] = capturer ? "osd plugin not loaded" : "no video source";
+        response = err.dump();
+    }
+    if (channel) {
+        channel->Send(response);
+    }
+    return true;
 }
 
 bool Conductor::TryHandleCaptureCommand(const std::string &msg) {

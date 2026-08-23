@@ -66,6 +66,7 @@ V4L2Capturer::V4L2Capturer(Args args)
     if (!args.osd.empty()) {
         osd_ = std::make_unique<OsdOverlay>(args.osd);
     }
+    osd_plugins_ = LoadOsdPlugins(args.osd_plugins);
 }
 
 V4L2Capturer::~V4L2Capturer() {
@@ -399,6 +400,13 @@ void V4L2Capturer::CaptureImage() {
         osd_->Draw((uint8_t *)capture_.buffers[buf.index].start, width_, height_, width_ * 2,
                    static_cast<yuv422_fmt_t>(format_));
     }
+    if (!osd_plugins_.empty() && (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY)) {
+        int yuv_fmt = (format_ == V4L2_PIX_FMT_UYVY) ? 1 : 0; // matches pi_plugin_api.h's yuv_fmt
+        for (auto &plugin : osd_plugins_) {
+            plugin->Draw((uint8_t *)capture_.buffers[buf.index].start, width_, height_, width_ * 2,
+                         yuv_fmt);
+        }
+    }
     if (hw_accel_ && IsCompressedFormat()) {
         if (!decoder_) {
             decoder_ = V4L2Decoder::Create({width_, height_, format_, true});
@@ -564,6 +572,23 @@ void V4L2Capturer::PinUsbIrqToCpu(int cpu) {
 }
 
 bool V4L2Capturer::SetControls(int key, int value) { return V4L2Util::SetExtCtrl(fd_, key, value); }
+
+bool V4L2Capturer::TryOsdPluginCommand(const std::string &plugin_name, const std::string &request_json,
+                                       std::string *response_json) {
+    for (auto &plugin : osd_plugins_) {
+        if (plugin->name() == plugin_name) {
+            std::string resp = plugin->Command(request_json);
+            // A well-behaved plugin always returns a JSON reply; synthesize one
+            // if it returned nothing so the caller never has to guess whether
+            // the command was applied.
+            if (response_json) {
+                *response_json = resp.empty() ? "{\"ok\":true}" : resp;
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
 webrtc::scoped_refptr<webrtc::I420BufferInterface> V4L2Capturer::GetI420Frame(int stream_idx) {
     return frame_buffer_->ToI420();

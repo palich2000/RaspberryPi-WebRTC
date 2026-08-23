@@ -223,6 +223,11 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
             "look via 'key value' lines: v_align top|bottom, h_align left|right, "
             "v_offset/h_offset pixels, style box|box-semi|none|shadow, scale N. Defaults "
             "to top-right, opaque box, scale 2. Empty (default) disables the overlay.")
+        ("osd-plugin", bpo::value<std::vector<std::string>>(&args.osd_plugins)->composing(),
+            "Load an OSD plugin .so (see plugin-api/pi_plugin_api.h). Repeatable. "
+            "Each plugin draws into the raw captured frame every capture (same hook "
+            "as --osd/the clock overlay) and is driven live by IPC DataChannel "
+            "messages carrying \"plugin\":\"<its declared name>\".")
         ("enable-ipc", bpo::bool_switch(&args.enable_ipc)->default_value(args.enable_ipc),
             "Enable IPC relay using a WebRTC DataChannel, lossy (UDP-like) or reliable (TCP-like) based on client preference.")
         ("ipc-channel",  bpo::value<std::string>(&args.ipc_channel)->default_value(args.ipc_channel),

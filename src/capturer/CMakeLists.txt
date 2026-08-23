@@ -8,6 +8,7 @@ set(CAPTURE_FILES
     alsa_capturer.cpp
     yuyv_clock.cpp
     osd_overlay.cpp
+    osd_plugin_loader.cpp
 )
 
 if(USE_LIBARGUS_CAPTURE)
@@ -76,6 +77,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     ${PULSE_INCLUDE_DIRS}
     ${PULSE_SIMPLE_INCLUDE_DIRS}
     ${ALSA_INCLUDE_DIRS}
+    ${PI_PLUGIN_API_DIR}
 )
 
 target_link_libraries(${PROJECT_NAME} PUBLIC
@@ -84,6 +86,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
     ${PULSE_LINK_LIBRARIES}
     ${PULSE_SIMPLE_LINK_LIBRARIES}
     ${ALSA_LINK_LIBRARIES}
+    ${CMAKE_DL_LIBS}
 )
 
 if(USE_LIBARGUS_CAPTURE)

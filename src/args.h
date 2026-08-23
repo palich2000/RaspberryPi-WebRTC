@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <linux/videodev2.h>
 
@@ -178,6 +179,12 @@ struct Args {
     // the glob's directory is watched via inotify and matching files' first lines
     // are joined with " | " and drawn in the top-right corner of the stream.
     std::string osd = "";
+    // Paths to OSD plugin .so files (see plugin-api/pi_plugin_api.h), loaded via
+    // dlopen(). Each draws into the raw captured frame on every capture, same hook
+    // as the built-in clock/text overlay. Repeatable; empty = no OSD plugins.
+    // A viewer drives one by sending {"cmd":...,"plugin":"<its declared name>",...}
+    // over the IPC DataChannel - see Conductor::TryHandleOsdPluginCommand.
+    std::vector<std::string> osd_plugins;
     std::string uid = "";
     // Human-readable label for this camera instance, shown in the UI/viewer
     // (e.g. "Front Left"). Distinct from `uid`, which is the routing identity

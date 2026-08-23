@@ -108,6 +108,14 @@ message(STATUS "WEBRTC_LIBRARY: ${WEBRTC_LIBRARY_PATH}")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# Shared C ABI header for OSD / device-control plugins (plugin-api/pi_plugin_api.h),
+# used by src/capturer/osd_plugin_loader.cpp. Lives in the outer monorepo one
+# directory up by default; override with -DPI_PLUGIN_API_DIR=... when building
+# this repo standalone outside that layout.
+set(PI_PLUGIN_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../plugin-api" CACHE PATH
+    "Directory containing pi_plugin_api.h")
+message(STATUS "PI_PLUGIN_API_DIR: ${PI_PLUGIN_API_DIR}")
+
 add_subdirectory(src/capturer)
 add_subdirectory(src/codecs/h264)
 add_subdirectory(src/codecs/v4l2)
