@@ -1,8 +1,10 @@
 #include "libcamera_capturer.h"
 
+#include <pthread.h>
 #include <sys/mman.h>
 
 #include "common/logging.h"
+#include "yuyv_clock.h"
 #include <libcamera/geometry.h>
 
 std::shared_ptr<LibcameraCapturer> LibcameraCapturer::Create(Args args) {
@@ -22,9 +24,20 @@ LibcameraCapturer::LibcameraCapturer(Args args)
       buffer_count_(2),
       format_(args.format),
       config_(args),
-      is_controls_updated_(false) {}
+      is_controls_updated_(false),
+      running_(false),
+      stopping_(false),
+      draw_clock_(!args.no_clock) {
+    if (!args.osd.empty()) {
+        osd_ = std::make_unique<OsdOverlay>(args.osd);
+    }
+    osd_plugins_ = LoadOsdPlugins(args.osd_plugins);
+}
 
 LibcameraCapturer::~LibcameraCapturer() {
+    // A running camera's stop() here cancels its in-flight requests, which
+    // RequestComplete() would otherwise treat as a fatal, unexpected cancellation.
+    stopping_ = true;
     camera_->stop();
     allocator_->free(stream_);
     allocator_.reset();
@@ -80,7 +93,15 @@ void LibcameraCapturer::InitCamera() {
         camera_config_->at(0).size = size;
     }
 
-    camera_config_->at(0).pixelFormat = libcamera::formats::YUV420;
+    // Packed UYVY (not planar YUV420) is only requested when `format_` says an
+    // overlay feature needs it (see parser.cpp's ParseDevice) - it lets the existing
+    // YUYV/UYVY-only clock/OSD/plugin overlay code (shared with V4L2Capturer) draw on
+    // libcamera frames, at the cost of a libyuv format conversion in ToI420() that
+    // plain YUV420 (direct memcpy) does not pay. Confirmed working on Pi 4's
+    // vc4/bcm2835-isp with this OV5647; NOT yet verified on Pi 5's different
+    // pisp/rp1-cfe pipeline handler.
+    camera_config_->at(0).pixelFormat =
+        (format_ == V4L2_PIX_FMT_UYVY) ? libcamera::formats::UYVY : libcamera::formats::YUV420;
     camera_config_->at(0).bufferCount = buffer_count_;
 
     if (width_ >= 1280 || width_ >= 720) {
@@ -105,8 +126,15 @@ void LibcameraCapturer::InitCamera() {
 
     INFO_PRINT("  width: %d, height: %d, stride: %d", width_, height_, stride_);
 
-    if (width_ != stride_) {
-        ERROR_PRINT("Stride is not equal to width");
+    // Planar formats (e.g. YUV420) need stride == width; packed 2-bytes/pixel
+    // formats (YUYV/UYVY) need stride == width * 2.
+    int bytes_per_pixel =
+        (camera_config_->at(0).pixelFormat == libcamera::formats::UYVY ||
+         camera_config_->at(0).pixelFormat == libcamera::formats::YUYV)
+            ? 2
+            : 1;
+    if (stride_ != width_ * bytes_per_pixel) {
+        ERROR_PRINT("Stride does not match width * bytes-per-pixel for this format");
         exit(EXIT_FAILURE);
     }
 }
@@ -283,8 +311,25 @@ void LibcameraCapturer::AllocateBuffer() {
 }
 
 void LibcameraCapturer::RequestComplete(libcamera::Request *request) {
+    // Called on libcamera's own internal dispatch thread, which we never created
+    // (unlike V4L2Capturer's explicitly-named "V4L2 Capturer" Worker), so it shows
+    // up unnamed (as "pi-webrtc") in top/htop. Naming the calling thread from here
+    // works even though we don't own its creation.
+    static thread_local bool thread_named = false;
+    if (!thread_named) {
+        pthread_setname_np(pthread_self(), "libcamera-cap");
+        thread_named = true;
+    }
+
     if (request->status() == libcamera::Request::RequestCancelled) {
-        DEBUG_PRINT("Request has been cancelled");
+        if (stopping_) {
+            // Expected: StopCapture()/the destructor just called camera_->stop(), which
+            // cancels every in-flight request. Leave it as-is (Cancelled) - ResumeCapture()
+            // will reuse() and re-queue it if/when the camera restarts.
+            DEBUG_PRINT("Request cancelled by intentional StopCapture - ignoring");
+            return;
+        }
+        ERROR_PRINT("Request has been cancelled unexpectedly");
         exit(1);
     }
 
@@ -297,6 +342,21 @@ void LibcameraCapturer::RequestComplete(libcamera::Request *request) {
     timeval tv = {};
     tv.tv_sec = buffer->metadata().timestamp / 1000000000;
     tv.tv_usec = (buffer->metadata().timestamp % 1000000000) / 1000;
+
+    if (draw_clock_ && (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY)) {
+        overlay_clock_yuv422(static_cast<uint8_t *>(data), width_, height_, width_ * 2,
+                             static_cast<yuv422_fmt_t>(format_));
+    }
+    if (osd_ && (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY)) {
+        osd_->Draw(static_cast<uint8_t *>(data), width_, height_, width_ * 2,
+                  static_cast<yuv422_fmt_t>(format_));
+    }
+    if (!osd_plugins_.empty() && (format_ == V4L2_PIX_FMT_YUYV || format_ == V4L2_PIX_FMT_UYVY)) {
+        int yuv_fmt = (format_ == V4L2_PIX_FMT_UYVY) ? 1 : 0; // matches pi_plugin_api.h's yuv_fmt
+        for (auto &plugin : osd_plugins_) {
+            plugin->Draw(static_cast<uint8_t *>(data), width_, height_, width_ * 2, yuv_fmt);
+        }
+    }
 
     auto v4l2_buffer = V4L2Buffer::FromLibcamera((uint8_t *)data, length, fd, tv, format_);
     frame_buffer_ = V4L2FrameBuffer::Create(width_, height_, v4l2_buffer);
@@ -314,6 +374,21 @@ void LibcameraCapturer::RequestComplete(libcamera::Request *request) {
     }
 
     camera_->queueRequest(request);
+}
+
+bool LibcameraCapturer::TryOsdPluginCommand(const std::string &plugin_name,
+                                            const std::string &request_json,
+                                            std::string *response_json) {
+    for (auto &plugin : osd_plugins_) {
+        if (plugin->name() == plugin_name) {
+            std::string resp = plugin->Command(request_json);
+            if (response_json) {
+                *response_json = resp.empty() ? "{\"ok\":true}" : resp;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 void LibcameraCapturer::CameraDisconnected() {
@@ -359,4 +434,57 @@ void LibcameraCapturer::StartCapture() {
             camera_->stop();
         }
     }
+
+    running_ = true;
+}
+
+void LibcameraCapturer::StopCapture() {
+    if (!running_) {
+        DEBUG_PRINT("StopCapture: camera not running, ignoring");
+        return;
+    }
+    // Cancels every in-flight request; RequestComplete() swallows those while
+    // stopping_ is set. Keep the camera acquired/configured and the buffers
+    // mapped (no allocator_->free()/camera_->release()) so ResumeCapture() can
+    // restart cheaply, and so any frame still being read asynchronously by the
+    // encoder stays valid (same reasoning as V4L2Capturer's STREAMOFF-only pause).
+    stopping_ = true;
+    camera_->stop();
+    stopping_ = false;
+    running_ = false;
+}
+
+void LibcameraCapturer::ResumeCapture() {
+    if (running_) {
+        DEBUG_PRINT("ResumeCapture: camera already running, ignoring");
+        return;
+    }
+    if (requests_.empty()) {
+        // First activation (e.g. --start-passive): nothing allocated yet.
+        StartCapture();
+        return;
+    }
+    // Resuming after StopCapture(): camera is still acquired/configured and the
+    // requests/buffers are still allocated - just reuse and re-queue them and
+    // restart streaming, no configure()/AllocateBuffer() again.
+    for (auto &request : requests_) {
+        request->reuse(libcamera::Request::ReuseBuffers);
+    }
+    int ret = camera_->start(&controls_);
+    if (ret) {
+        ERROR_PRINT("Failed to restart capturing");
+        exit(1);
+    }
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        controls_.clear();
+    }
+    for (auto &request : requests_) {
+        ret = camera_->queueRequest(request.get());
+        if (ret < 0) {
+            ERROR_PRINT("Can't queue request");
+            camera_->stop();
+        }
+    }
+    running_ = true;
 }

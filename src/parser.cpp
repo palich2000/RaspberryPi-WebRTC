@@ -454,8 +454,14 @@ void Parser::ParseDevice(Args &args) {
     if (prefix == "libcamera") {
 #if defined(USE_LIBCAMERA_CAPTURE)
         args.use_libcamera = true;
-        args.format = V4L2_PIX_FMT_YUV420;
-        INFO_PRINT("Using libcamera, ID: %d", args.camera_id);
+        // Packed UYVY is only needed to let the clock/OSD/OSD-plugin overlay draw on
+        // the frame (see LibcameraCapturer::RequestComplete) - it costs a libyuv
+        // format conversion in ToI420() that plain planar YUV420 does not. Stay on
+        // YUV420 (direct memcpy) whenever no overlay feature is actually requested.
+        bool needs_overlay = !args.no_clock || !args.osd.empty() || !args.osd_plugins.empty();
+        args.format = needs_overlay ? V4L2_PIX_FMT_UYVY : V4L2_PIX_FMT_YUV420;
+        INFO_PRINT("Using libcamera, ID: %d, format: %s", args.camera_id,
+                   needs_overlay ? "UYVY (overlay requested)" : "YUV420 (no overlay requested)");
 #elif defined(JETSON_PLATFORM)
         throw std::runtime_error("Jetson does not support libcamera. Use v4l2:<id> instead.");
 #else

@@ -500,6 +500,10 @@ void Conductor::InitializePeerConnectionFactory() {
     worker_thread_ = webrtc::Thread::Create();
     signaling_thread_ = webrtc::Thread::Create();
 
+    network_thread_->SetName("rtc-network", nullptr);
+    worker_thread_->SetName("rtc-worker", nullptr);
+    signaling_thread_->SetName("rtc-signaling", nullptr);
+
     for (auto *thread : {network_thread_.get(), worker_thread_.get(), signaling_thread_.get()}) {
         if (!thread->Start()) {
             ERROR_PRINT("Thread start failed!");
