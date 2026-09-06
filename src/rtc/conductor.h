@@ -62,6 +62,18 @@ class Conductor {
     // command took effect. Returns false when the message carries no "plugin"
     // field at all (not plugin-related, falls through to normal handling).
     bool TryHandleOsdPluginCommand(std::shared_ptr<RtcChannel> channel, const std::string &msg);
+    // Route the browser's {"cmd":"get"|"set","param_name":...} control JSON to
+    // a libcamera-backed capturer's own ControlList, entirely in-process -
+    // never forwarded to ipc_socket_client, which cannot safely poke V4L2
+    // ioctls on a device libcamera holds exclusively (see
+    // LIBCAMERA_INTEGRATION_PLAN.md Phase 3). Returns true (and always
+    // replies over `channel`) only when the active capturer is
+    // libcamera-backed AND the command names a control this path owns
+    // (brightness/contrast today); false otherwise, so V4L2 cameras and any
+    // other command (ping/calibrate/unknown param names) fall through to the
+    // normal ipc_socket_client forward unchanged.
+    bool TryHandleLibcameraControlCommand(std::shared_ptr<RtcChannel> channel,
+                                          const std::string &msg);
     // Stamp this instance's capture device into a forwarded control request so
     // ipc_socket_client (which may serve several cameras) targets the right V4L2
     // node. Returns the message with a "video_dev" field added; passes it through

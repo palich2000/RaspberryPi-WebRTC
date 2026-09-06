@@ -30,6 +30,18 @@ class LibcameraCapturer : public VideoCapturer {
     Args config() const override;
 
     bool SetControls(int key, int value) override;
+    // Get/set a float-valued libcamera control (Brightness/Contrast today) by
+    // its libcamera Control<float> descriptor, for the JSON get/set protocol
+    // exposed over the IPC DataChannel (see
+    // Conductor::TryHandleLibcameraControlCommand). Distinct from
+    // SetControls(int,int) above, which is the legacy per-id protobuf path and
+    // only handles integer-typed controls - Brightness/Contrast are float in
+    // libcamera, so setting them via the int path would construct the wrong
+    // ControlValue type. Returns false if this sensor/pipeline does not
+    // advertise the control at all (queried from camera_->controls()).
+    bool GetControlFloat(const libcamera::Control<float> &ctrl, float *value, float *min,
+                         float *max, float *def);
+    bool SetControlFloat(const libcamera::Control<float> &ctrl, float value);
     void StartCapture() override;
     // Stop streaming but keep the camera acquired/configured and the requests/
     // buffers allocated (mirrors V4L2Capturer's STREAMOFF-only pause) - RequestComplete

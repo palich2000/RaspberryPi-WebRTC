@@ -270,6 +270,32 @@ bool LibcameraCapturer::SetControls(int key, int value) {
     return true;
 }
 
+bool LibcameraCapturer::GetControlFloat(const libcamera::Control<float> &ctrl, float *value,
+                                        float *min, float *max, float *def) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    auto it = camera_->controls().find(&ctrl);
+    if (it == camera_->controls().end()) {
+        return false;
+    }
+    const libcamera::ControlInfo &info = it->second;
+    *min = info.min().isNone() ? 0.0f : info.min().get<float>();
+    *max = info.max().isNone() ? 0.0f : info.max().get<float>();
+    *def = info.def().isNone() ? *min : info.def().get<float>();
+    auto cur = controls_.get(ctrl);
+    *value = cur ? *cur : *def;
+    return true;
+}
+
+bool LibcameraCapturer::SetControlFloat(const libcamera::Control<float> &ctrl, float value) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (camera_->controls().find(&ctrl) == camera_->controls().end()) {
+        return false;
+    }
+    controls_.set(ctrl, value);
+    is_controls_updated_ = true;
+    return true;
+}
+
 void LibcameraCapturer::AllocateBuffer() {
     allocator_ = std::make_unique<libcamera::FrameBufferAllocator>(camera_);
 

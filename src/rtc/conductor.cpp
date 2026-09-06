@@ -601,6 +601,9 @@ void Conductor::BindDataChannelToIpcReceiver(std::shared_ptr<RtcChannel> channel
         if (TryHandleCaptureCommand(msg)) {
             return;
         }
+        if (TryHandleLibcameraControlCommand(channel, msg)) {
+            return;
+        }
         ipc_server_->Write(InjectControlDevice(msg));
     });
     DEBUG_PRINT("DataChannel (%s) connected to IPC server for receiving.",
@@ -670,6 +673,126 @@ bool Conductor::TryHandleCaptureCommand(const std::string &msg) {
         }
     }).detach();
     return true;
+}
+
+bool Conductor::TryHandleLibcameraControlCommand(std::shared_ptr<RtcChannel> channel,
+                                                 const std::string &msg) {
+#if defined(USE_LIBCAMERA_CAPTURE)
+    if (!args.use_libcamera) {
+        return false;
+    }
+    auto j = nlohmann::json::parse(msg, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object() || j.contains("domain")) {
+        return false; // not JSON, or a device-plugin command - leave those alone
+    }
+    auto cmd_it = j.find("cmd");
+    if (cmd_it == j.end() || !cmd_it->is_string()) {
+        return false;
+    }
+    std::string cmd = cmd_it->get<std::string>();
+    if (cmd != "get" && cmd != "set") {
+        // ping/calibrate/etc: no libcamera equivalent today. Let it fall
+        // through to ipc_socket_client, which will fail/no-op for a libcamera
+        // camera (no V4L2 control node it recognizes) - the browser is
+        // expected to have already disabled the Calibrate button via
+        // can_calibrate:false in the "get" reply below, so this path is only
+        // hit by something other than the normal UI (e.g. a stray "ping").
+        return false;
+    }
+
+    auto capturer = std::dynamic_pointer_cast<LibcameraCapturer>(video_capture_source_);
+    if (!capturer) {
+        return false;
+    }
+
+    struct Entry {
+        const char *name;
+        const libcamera::Control<float> &ctrl;
+    };
+    static const Entry kControls[] = {
+        {"brightness", libcamera::controls::Brightness},
+        {"contrast", libcamera::controls::Contrast},
+    };
+
+    if (cmd == "get") {
+        std::string requested = j.value("param_name", std::string());
+        if (!requested.empty()) {
+            for (const auto &e : kControls) {
+                if (requested != e.name) {
+                    continue;
+                }
+                float value, min, max, def;
+                if (!capturer->GetControlFloat(e.ctrl, &value, &min, &max, &def)) {
+                    return false;
+                }
+                nlohmann::json resp;
+                resp["ok"] = true;
+                resp["name"] = e.name;
+                resp["min"] = min;
+                resp["max"] = max;
+                resp["def"] = def;
+                resp["step"] = (max - min) / 100.0f;
+                resp["cur"] = value;
+                if (channel) {
+                    channel->Send(resp.dump());
+                }
+                return true;
+            }
+            return false; // not one of ours - let ipc_socket_client try as before
+        }
+
+        // Whole-list get: build the same {"params":[...]} shape the browser
+        // already renders (see sfu/camcontrols.go), plus can_calibrate:false -
+        // there is no libcamera equivalent of the V4L2 focus-toggle
+        // calibration trick, so the UI disables its Calibrate button on this
+        // reply instead of sending a command that would fail downstream.
+        nlohmann::json params = nlohmann::json::array();
+        for (const auto &e : kControls) {
+            float value, min, max, def;
+            if (!capturer->GetControlFloat(e.ctrl, &value, &min, &max, &def)) {
+                continue; // not advertised by this sensor/pipeline - simply omit
+            }
+            nlohmann::json p;
+            p["name"] = e.name;
+            p["min"] = min;
+            p["max"] = max;
+            p["def"] = def;
+            p["step"] = (max - min) / 100.0f;
+            p["cur"] = value;
+            params.push_back(p);
+        }
+        nlohmann::json resp;
+        resp["ok"] = true;
+        resp["can_calibrate"] = false;
+        resp["params"] = params;
+        if (channel) {
+            channel->Send(resp.dump());
+        }
+        return true;
+    }
+
+    // cmd == "set"
+    std::string name = j.value("param_name", std::string());
+    for (const auto &e : kControls) {
+        if (name != e.name) {
+            continue;
+        }
+        float value = j.value("value", 0.0f);
+        bool ok = capturer->SetControlFloat(e.ctrl, value);
+        if (channel) {
+            nlohmann::json resp;
+            resp["ok"] = ok;
+            resp["name"] = name;
+            channel->Send(resp.dump());
+        }
+        return true;
+    }
+    return false; // unknown param name for this backend - fall through
+#else
+    (void)channel;
+    (void)msg;
+    return false;
+#endif
 }
 
 std::string Conductor::InjectControlDevice(const std::string &msg) {
