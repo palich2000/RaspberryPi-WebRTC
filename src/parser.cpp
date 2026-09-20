@@ -261,13 +261,22 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
         ("use-tls", bpo::bool_switch(&args.use_tls)->default_value(args.use_tls),
             "Use TLS for the WebSocket connection. Use it when connecting to a `wss://` URL.")
         ("ws-host", bpo::value<std::string>(&args.ws_host)->default_value(args.ws_host),
-            "The WebSocket host address of the SFU server.")
+            "The WebSocket host address of the SFU server. Special value \"auto\" listens for a "
+            "pi-sfu multicast announce instead (see --discovery-group/--discovery-port); demo/"
+            "test bench convenience, not for an untrusted LAN.")
         ("ws-port", bpo::value<uint16_t>(&args.ws_port)->default_value(args.ws_port),
-            "The WebSocket port of the SFU server. 0 (default) uses 443 with TLS, otherwise 80.")
+            "The WebSocket port of the SFU server. 0 (default) uses 443 with TLS, otherwise 80. "
+            "Ignored when --ws-host=auto (the announce carries the port).")
         ("ws-room", bpo::value<std::string>(&args.ws_room)->default_value(args.ws_room),
             "The room name to join on the SFU server.")
         ("ws-key", bpo::value<std::string>(&args.ws_key)->default_value(args.ws_key),
             "The API key used to authenticate with the SFU server.")
+        ("discovery-group", bpo::value<std::string>(&args.discovery_group)
+            ->default_value(args.discovery_group),
+            "Multicast group to listen on for a pi-sfu announce when --ws-host=auto.")
+        ("discovery-port", bpo::value<uint16_t>(&args.discovery_port)
+            ->default_value(args.discovery_port),
+            "Multicast port to listen on for a pi-sfu announce when --ws-host=auto.")
         ("config", bpo::value<std::string>()->default_value(""),
             "Path to a YAML configuration file. All CLI options can be specified as YAML keys. "
             "Command-line arguments take priority over values in the config file.");

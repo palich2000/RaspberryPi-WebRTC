@@ -10,6 +10,7 @@
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 
+#include <array>
 #include <variant>
 
 namespace beast = boost::beast;
@@ -52,8 +53,24 @@ class WebsocketService : public SignalingService {
     bool reconnecting_ = false; // a reconnect is already scheduled
     int reconnect_attempts_ = 0;
 
+    // SFU auto-discovery (--ws-host=auto): the host/port actually used to connect,
+    // resolved either straight from args_ (normal case) or from a multicast
+    // announce (see StartDiscovery). Kept separate from args_.ws_host so the
+    // literal "auto" never leaks into a DNS resolve or a WebSocket Host header.
+    std::string connect_host_;
+    uint16_t connect_port_ = 0;
+    net::ip::udp::socket discovery_socket_;
+    std::array<char, 512> discovery_buffer_;
+    net::ip::udp::endpoint discovery_sender_;
+    bool discovery_active_ = false;
+
     WebSocketVariant InitWebSocket(net::io_context &ioc);
     void RecreateWebSocket(); // rebuild ws_ in place for a reconnect attempt
+    void ResolveAndConnect(); // the pre-discovery body of Connect()
+    void StartDiscovery();
+    void StopDiscovery();
+    void DoDiscoveryReceive();
+    void OnDiscoveryReceive(boost::system::error_code ec, std::size_t bytes_transferred);
     void OnResolve(beast::error_code ec, tcp::resolver::results_type results);
     void OnConnect(beast::error_code ec);
     void OnHandshake(beast::error_code ec);

@@ -218,6 +218,13 @@ struct Args {
     uint16_t ws_port = 0; // 0 = default (443 with TLS, otherwise 80)
     std::string ws_room = "";
     std::string ws_key = "";
+
+    // ws_host == "auto": listen for a pi-sfu multicast announce instead of using
+    // a fixed --ws-host, for a demo/test bench. Not for a deployment where an
+    // unknown device on the LAN segment shouldn't be able to make the camera
+    // connect to it.
+    std::string discovery_group = "239.255.42.99";
+    uint16_t discovery_port = 9999;
 };
 
 #endif // ARGS_H_

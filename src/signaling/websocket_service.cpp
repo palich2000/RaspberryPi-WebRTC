@@ -52,7 +52,8 @@ WebsocketService::WebsocketService(Args args, std::shared_ptr<Conductor> conduct
       ws_(InitWebSocket(ioc)),
       resolver_(net::make_strand(ioc)),
       ping_timer_(ioc),
-      reconnect_timer_(ioc) {}
+      reconnect_timer_(ioc),
+      discovery_socket_(ioc) {}
 
 WebsocketService::~WebsocketService() { Disconnect(); }
 
@@ -88,14 +89,114 @@ void WebsocketService::RecreateWebSocket() {
 }
 
 void WebsocketService::Connect() {
-    auto port = args_.ws_port != 0 ? args_.ws_port : (args_.use_tls ? 443 : 80);
-    INFO_PRINT("Connect to WebSocket %s:%d", args_.ws_host.c_str(), port);
+    if (args_.ws_host == "auto") {
+        StartDiscovery();
+        return;
+    }
+    connect_host_ = args_.ws_host;
+    connect_port_ = args_.ws_port != 0 ? args_.ws_port : (args_.use_tls ? 443 : 80);
+    ResolveAndConnect();
+}
+
+void WebsocketService::ResolveAndConnect() {
+    INFO_PRINT("Connect to WebSocket %s:%d", connect_host_.c_str(), connect_port_);
 
     resolver_.async_resolve(
-        args_.ws_host, std::to_string(port),
+        connect_host_, std::to_string(connect_port_),
         [this](boost::system::error_code ec, tcp::resolver::results_type results) {
             OnResolve(ec, results);
         });
+}
+
+// Multicast discovery for --ws-host=auto: listen on discovery_group/discovery_port
+// (see pi-sfu's -discovery-addr) for a JSON announce, take the sender's source IP
+// as the SFU host (never trust a host embedded in the payload) and its ws_port,
+// then proceed exactly as a fixed --ws-host would. Re-entered on every
+// (re)connect attempt while ws_host stays "auto", so a reconnect after an SFU
+// restart re-discovers rather than retrying a possibly stale address.
+void WebsocketService::StartDiscovery() {
+    if (discovery_active_) {
+        return;
+    }
+    // A previous attempt may have opened the socket and then failed a later step
+    // (bind/join); close it first so re-opening below doesn't fail on top of that.
+    boost::system::error_code ec;
+    if (discovery_socket_.is_open()) {
+        discovery_socket_.close(ec);
+    }
+
+    net::ip::udp::endpoint listen_ep(net::ip::udp::v4(), args_.discovery_port);
+    discovery_socket_.open(listen_ep.protocol(), ec);
+    if (!ec) {
+        discovery_socket_.set_option(net::ip::udp::socket::reuse_address(true), ec);
+    }
+    if (!ec) {
+        discovery_socket_.bind(listen_ep, ec);
+    }
+    if (!ec) {
+        auto group_addr = net::ip::make_address(args_.discovery_group, ec);
+        if (!ec) {
+            discovery_socket_.set_option(net::ip::multicast::join_group(group_addr), ec);
+        }
+    }
+    if (ec) {
+        ERROR_PRINT("Discovery: failed to listen on %s:%d: %s", args_.discovery_group.c_str(),
+                    args_.discovery_port, ec.message().c_str());
+        HandleFailure("Discovery setup failed");
+        return;
+    }
+
+    discovery_active_ = true;
+    INFO_PRINT("Discovery: waiting for an SFU announce on %s:%d", args_.discovery_group.c_str(),
+               args_.discovery_port);
+    DoDiscoveryReceive();
+}
+
+void WebsocketService::StopDiscovery() {
+    if (!discovery_active_) {
+        return;
+    }
+    discovery_active_ = false;
+    boost::system::error_code ec;
+    discovery_socket_.close(ec);
+}
+
+void WebsocketService::DoDiscoveryReceive() {
+    discovery_socket_.async_receive_from(
+        net::buffer(discovery_buffer_), discovery_sender_,
+        [this](boost::system::error_code ec, std::size_t bytes_transferred) {
+            OnDiscoveryReceive(ec, bytes_transferred);
+        });
+}
+
+void WebsocketService::OnDiscoveryReceive(boost::system::error_code ec,
+                                          std::size_t bytes_transferred) {
+    if (!discovery_active_) {
+        return; // StopDiscovery() already closed the socket (found one / shutting down)
+    }
+    if (ec) {
+        // Transient recv error: keep listening, the SFU re-announces every ~1.5s.
+        DoDiscoveryReceive();
+        return;
+    }
+
+    std::string payload(discovery_buffer_.data(), bytes_transferred);
+    try {
+        json beacon = json::parse(payload);
+        if (beacon.value("proto", "") == "pi-sfu-discovery" && beacon.contains("ws_port")) {
+            std::string host = discovery_sender_.address().to_string();
+            uint16_t port = beacon["ws_port"].get<uint16_t>();
+            StopDiscovery();
+            INFO_PRINT("Discovery: found SFU at %s:%d", host.c_str(), port);
+            connect_host_ = host;
+            connect_port_ = port;
+            ResolveAndConnect();
+            return;
+        }
+    } catch (const std::exception &e) {
+        DEBUG_PRINT("Discovery: ignoring unparseable announce: %s", e.what());
+    }
+    DoDiscoveryReceive();
 }
 
 void WebsocketService::Disconnect() {
@@ -103,6 +204,7 @@ void WebsocketService::Disconnect() {
     stopping_ = true;
     ping_timer_.cancel();
     reconnect_timer_.cancel();
+    StopDiscovery();
 
     std::visit(
         [](auto &ws) {
@@ -180,7 +282,8 @@ void WebsocketService::ScheduleReconnect() {
 
 void WebsocketService::OnResolve(beast::error_code ec, tcp::resolver::results_type results) {
     if (ec) {
-        HandleFailure("Failed to resolve: " + ec.message());
+        HandleFailure("Failed to resolve " + connect_host_ + ":" +
+                      std::to_string(connect_port_) + ": " + ec.message());
         return;
     }
 
@@ -196,7 +299,8 @@ void WebsocketService::OnResolve(beast::error_code ec, tcp::resolver::results_ty
 
 void WebsocketService::OnConnect(beast::error_code ec) {
     if (ec) {
-        HandleFailure("Failed to connect: " + ec.message());
+        HandleFailure("Failed to connect to " + connect_host_ + ":" +
+                      std::to_string(connect_port_) + ": " + ec.message());
         return;
     }
 
@@ -213,7 +317,7 @@ void WebsocketService::OnHandshake(websocket::stream<tcp::socket> &ws) {
                                       {"roomId", args_.ws_room},
                                       {"userId", args_.uid},
                                       {"canSubscribe", args_.enable_ipc ? "1" : "0"}});
-    ws.async_handshake(args_.ws_host, target, [this](boost::system::error_code ec) {
+    ws.async_handshake(connect_host_, target, [this](boost::system::error_code ec) {
         OnHandshake(ec);
     });
 }
@@ -222,14 +326,15 @@ void WebsocketService::OnHandshake(websocket::stream<ssl::stream<tcp::socket>> &
     ws.next_layer().async_handshake(
         ssl::stream_base::client, [this, &ws](boost::system::error_code ec) {
             if (ec) {
-                ERROR_PRINT("Failed to tls handshake: %s", ec.message().c_str());
+                ERROR_PRINT("Failed to tls handshake with %s:%d: %s", connect_host_.c_str(),
+                            connect_port_, ec.message().c_str());
             }
             std::string target =
                 BuildWebSocketTarget("/rtc", {{"apiKey", args_.ws_key},
                                               {"roomId", args_.ws_room},
                                               {"userId", args_.uid},
                                               {"canSubscribe", args_.enable_ipc ? "1" : "0"}});
-            ws.async_handshake(args_.ws_host, target, [this](boost::system::error_code ec) {
+            ws.async_handshake(connect_host_, target, [this](boost::system::error_code ec) {
                 OnHandshake(ec);
             });
         });
@@ -237,12 +342,13 @@ void WebsocketService::OnHandshake(websocket::stream<ssl::stream<tcp::socket>> &
 
 void WebsocketService::OnHandshake(beast::error_code ec) {
     if (ec) {
-        HandleFailure("Failed to handshake: " + ec.message());
+        HandleFailure("Failed to handshake with " + connect_host_ + ":" +
+                      std::to_string(connect_port_) + ": " + ec.message());
         return;
     }
 
     // Connected: clear reconnect state so the next drop starts fresh backoff.
-    INFO_PRINT("WebSocket connected to %s", args_.ws_host.c_str());
+    INFO_PRINT("WebSocket connected to %s", connect_host_.c_str());
     reconnecting_ = false;
     reconnect_attempts_ = 0;
 
@@ -260,7 +366,9 @@ void WebsocketService::Read() {
             ws.async_read(buffer_,
                           [this](boost::system::error_code ec, std::size_t bytes_transferred) {
                               if (ec) {
-                                  HandleFailure("Failed to read: " + ec.message());
+                                  HandleFailure("Failed to read from " + connect_host_ + ":" +
+                                                std::to_string(connect_port_) + ": " +
+                                                ec.message());
                                   return;
                               }
                               std::string req = beast::buffers_to_string(buffer_.data());
@@ -433,7 +541,9 @@ void WebsocketService::DoWrite() {
                                    }
                                }
                                if (failed) {
-                                   HandleFailure("Failed to write: " + ec.message());
+                                   HandleFailure("Failed to write to " + connect_host_ + ":" +
+                                                 std::to_string(connect_port_) + ": " +
+                                                 ec.message());
                                }
                            });
         },
