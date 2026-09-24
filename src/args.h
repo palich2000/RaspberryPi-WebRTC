@@ -218,6 +218,10 @@ struct Args {
     uint16_t ws_port = 0; // 0 = default (443 with TLS, otherwise 80)
     std::string ws_room = "";
     std::string ws_key = "";
+    // Read ws_key from this file instead (keeps the key out of argv / unit files).
+    std::string ws_key_file = "";
+    // Extra PEM CA bundle trusted for the TLS WebSocket, on top of the system store.
+    std::string ws_ca_file = "";
 
     // ws_host == "auto": listen for a pi-sfu multicast announce instead of using
     // a fixed --ws-host, for a demo/test bench. Not for a deployment where an

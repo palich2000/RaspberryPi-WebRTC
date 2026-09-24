@@ -64,6 +64,8 @@ class WebsocketService : public SignalingService {
     net::ip::udp::endpoint discovery_sender_;
     bool discovery_active_ = false;
 
+    ssl::context MakeTlsContext();
+    bool SetTlsPeerName(SSL *ssl);
     WebSocketVariant InitWebSocket(net::io_context &ioc);
     void RecreateWebSocket(); // rebuild ws_ in place for a reconnect attempt
     void ResolveAndConnect(); // the pre-discovery body of Connect()

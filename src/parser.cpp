@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <boost/program_options.hpp>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -271,6 +272,12 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
             "The room name to join on the SFU server.")
         ("ws-key", bpo::value<std::string>(&args.ws_key)->default_value(args.ws_key),
             "The API key used to authenticate with the SFU server.")
+        ("ws-key-file", bpo::value<std::string>(&args.ws_key_file)->default_value(args.ws_key_file),
+            "Read the WebSocket API key from this file (first line, surrounding whitespace "
+            "trimmed) instead of --ws-key, so it does not show up in the process list.")
+        ("ws-ca-file", bpo::value<std::string>(&args.ws_ca_file)->default_value(args.ws_ca_file),
+            "Extra PEM CA bundle to trust for the TLS WebSocket (--use-tls), in addition to the "
+            "system CA store. For a private or test CA.")
         ("discovery-group", bpo::value<std::string>(&args.discovery_group)
             ->default_value(args.discovery_group),
             "Multicast group to listen on for a pi-sfu announce when --ws-host=auto.")
@@ -362,6 +369,30 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
         if (args.ws_room.empty()) {
             std::cerr << "Error: --ws-room is required when --use-websocket is specified."
                       << std::endl;
+            exit(1);
+        }
+        if (!args.ws_key_file.empty()) {
+            if (!args.ws_key.empty()) {
+                std::cerr << "Error: use either --ws-key or --ws-key-file, not both." << std::endl;
+                exit(1);
+            }
+            std::ifstream key_in(args.ws_key_file);
+            std::string key;
+            if (!key_in || !std::getline(key_in, key)) {
+                std::cerr << "Error: cannot read --ws-key-file " << args.ws_key_file << std::endl;
+                exit(1);
+            }
+            const auto first = key.find_first_not_of(" \t\r\n");
+            const auto last = key.find_last_not_of(" \t\r\n");
+            if (first == std::string::npos) {
+                std::cerr << "Error: --ws-key-file " << args.ws_key_file << " is empty."
+                          << std::endl;
+                exit(1);
+            }
+            args.ws_key = key.substr(first, last - first + 1);
+        }
+        if (!args.ws_ca_file.empty() && !std::ifstream(args.ws_ca_file)) {
+            std::cerr << "Error: cannot read --ws-ca-file " << args.ws_ca_file << std::endl;
             exit(1);
         }
     }

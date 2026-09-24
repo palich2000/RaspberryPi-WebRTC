@@ -1,6 +1,10 @@
 #include "signaling/websocket_service.h"
 
 #include <nlohmann/json.hpp>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+#include <random>
 
 using json = nlohmann::json;
 
@@ -57,19 +61,50 @@ WebsocketService::WebsocketService(Args args, std::shared_ptr<Conductor> conduct
 
 WebsocketService::~WebsocketService() { Disconnect(); }
 
+// Client TLS context: TLS 1.2+, peer certificate verified against the system CA
+// store plus the optional --ws-ca-file. The peer NAME is checked per connection
+// in SetTlsPeerName, since the host can change (--ws-host=auto).
+//
+// The SSL context created via boost::asio::ssl::context uses the underlying BoringSSL
+// implementation (when linked with WebRTC or other BoringSSL-based libraries). BoringSSL is
+// not a drop-in replacement for OpenSSL and does not implement all OpenSSL APIs. As a
+// result, certain methods may be unsupported or behave differently.
+// Ensure that only compatible OpenSSL APIs are used when BoringSSL is present.
+ssl::context WebsocketService::MakeTlsContext() {
+    ssl::context ctx(ssl::context::tls);
+    SSL_CTX_set_min_proto_version(ctx.native_handle(), TLS1_2_VERSION);
+    ctx.set_default_verify_paths();
+    if (!args_.ws_ca_file.empty()) {
+        boost::system::error_code ec;
+        ctx.load_verify_file(args_.ws_ca_file, ec);
+        if (ec) {
+            ERROR_PRINT("Failed to load --ws-ca-file %s: %s", args_.ws_ca_file.c_str(),
+                        ec.message().c_str());
+        }
+    }
+    ctx.set_verify_mode(ssl::verify_peer);
+    return ctx;
+}
+
+// Bind certificate verification to the host we are connecting to. verify_peer
+// alone accepts ANY certificate from a trusted CA, i.e. any other site's.
+bool WebsocketService::SetTlsPeerName(SSL *ssl) {
+    X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+    X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+    boost::system::error_code ec;
+    net::ip::make_address(connect_host_, ec);
+    if (!ec) {
+        // IP literal: must match an IP SAN. SNI never carries an IP (RFC 6066).
+        return X509_VERIFY_PARAM_set1_ip_asc(param, connect_host_.c_str()) == 1;
+    }
+    return SSL_set_tlsext_host_name(ssl, connect_host_.c_str()) == 1 &&
+           X509_VERIFY_PARAM_set1_host(param, connect_host_.c_str(), connect_host_.size()) == 1;
+}
+
 WebSocketVariant WebsocketService::InitWebSocket(net::io_context &ioc) {
     if (args_.use_tls) {
-        // The SSL context created via boost::asio::ssl::context uses the underlying BoringSSL
-        // implementation (when linked with WebRTC or other BoringSSL-based libraries). BoringSSL is
-        // not a drop-in replacement for OpenSSL and does not implement all OpenSSL APIs. As a
-        // result, certain methods may be unsupported or behave differently.
-        // Ensure that only compatible OpenSSL APIs are used when BoringSSL is present.
         DEBUG_PRINT("Using TLS WebSocket, SSL version: %s", OpenSSL_version(OPENSSL_VERSION));
-
-        ssl::context ctx(ssl::context::tls);
-        ctx.set_default_verify_paths();
-        ctx.set_verify_mode(ssl::verify_peer);
-
+        ssl::context ctx = MakeTlsContext();
         return websocket::stream<ssl::stream<tcp::socket>>(net::make_strand(ioc), ctx);
     } else {
         return websocket::stream<tcp::socket>(net::make_strand(ioc));
@@ -79,9 +114,7 @@ WebSocketVariant WebsocketService::InitWebSocket(net::io_context &ioc) {
 void WebsocketService::RecreateWebSocket() {
     // emplace (not assignment): beast's websocket stream is not move-assignable.
     if (args_.use_tls) {
-        ssl::context ctx(ssl::context::tls);
-        ctx.set_default_verify_paths();
-        ctx.set_verify_mode(ssl::verify_peer);
+        ssl::context ctx = MakeTlsContext();
         ws_.emplace<websocket::stream<ssl::stream<tcp::socket>>>(net::make_strand(ioc_), ctx);
     } else {
         ws_.emplace<websocket::stream<tcp::socket>>(net::make_strand(ioc_));
@@ -260,13 +293,16 @@ void WebsocketService::ScheduleReconnect() {
     }
     buffer_.consume(buffer_.size());
 
-    // Exponential backoff capped at 8s: 1, 2, 4, 8, 8, ...
+    // Exponential backoff capped at 8s: 1, 2, 4, 8, 8, ... spread by +-30% so many
+    // cameras that lost the same server do not all come back in lockstep.
     int shift = reconnect_attempts_ < 3 ? reconnect_attempts_ : 3;
-    int delay = 1 << shift;
+    static thread_local std::mt19937 rng(std::random_device{}());
+    int spread = std::uniform_int_distribution<int>(-30, 30)(rng);
+    int delay_ms = (1000 << shift) * (100 + spread) / 100;
     reconnect_attempts_++;
-    INFO_PRINT("Reconnecting to WebSocket in %ds", delay);
+    INFO_PRINT("Reconnecting to WebSocket in %.1fs", delay_ms / 1000.0);
 
-    reconnect_timer_.expires_after(std::chrono::seconds(delay));
+    reconnect_timer_.expires_after(std::chrono::milliseconds(delay_ms));
     reconnect_timer_.async_wait([this](const boost::system::error_code &ec) {
         if (ec || stopping_) {
             return;
@@ -323,11 +359,23 @@ void WebsocketService::OnHandshake(websocket::stream<tcp::socket> &ws) {
 }
 
 void WebsocketService::OnHandshake(websocket::stream<ssl::stream<tcp::socket>> &ws) {
+    if (!SetTlsPeerName(ws.next_layer().native_handle())) {
+        HandleFailure("Failed to set the TLS peer name for " + connect_host_);
+        return;
+    }
     ws.next_layer().async_handshake(
         ssl::stream_base::client, [this, &ws](boost::system::error_code ec) {
             if (ec) {
-                ERROR_PRINT("Failed to tls handshake with %s:%d: %s", connect_host_.c_str(),
-                            connect_port_, ec.message().c_str());
+                // Fail closed: never send the API key and the signaling over a TLS
+                // session whose certificate did not verify.
+                long verify = SSL_get_verify_result(ws.next_layer().native_handle());
+                std::string detail = ec.message();
+                if (verify != X509_V_OK) {
+                    detail += std::string(" (") + X509_verify_cert_error_string(verify) + ")";
+                }
+                HandleFailure("Failed to tls handshake with " + connect_host_ + ":" +
+                              std::to_string(connect_port_) + ": " + detail);
+                return;
             }
             std::string target =
                 BuildWebSocketTarget("/rtc", {{"apiKey", args_.ws_key},
