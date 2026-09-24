@@ -237,13 +237,19 @@ void Parser::ParseArgs(int argc, char *argv[], Args &args) {
             "Specifies the Unix domain socket path used to bridge messages between "
             "the WebRTC DataChannel and local IPC applications.")
         ("stun-url", bpo::value<std::string>(&args.stun_url)->default_value(args.stun_url),
-            "Set the STUN server URL for WebRTC. e.g. `stun:xxx.xxx.xxx`.")
+            "Set the STUN server URL for WebRTC. e.g. `stun:xxx.xxx.xxx`. No default: without "
+            "it the camera offers host candidates only (plus whatever TURN it is given).")
         ("turn-url", bpo::value<std::string>(&args.turn_url)->default_value(args.turn_url),
             "Set the TURN server URL for WebRTC. e.g. `turn:xxx.xxx.xxx:3478?transport=tcp`.") 
         ("turn-username", bpo::value<std::string>(&args.turn_username)->default_value(args.turn_username),
             "Set the TURN server username for WebRTC authentication.")
         ("turn-password", bpo::value<std::string>(&args.turn_password)->default_value(args.turn_password),
             "Set the TURN server password for WebRTC authentication.")
+        ("turn-tls-insecure", bpo::bool_switch(&args.turn_tls_insecure)->default_value(args.turn_tls_insecure),
+            "Do not verify the certificate of `turns:` (TURN over TLS) servers, both --turn-url "
+            "and the ones an SFU hands over. libwebrtc checks them against its own built-in root "
+            "list, which lacks some public CAs (e.g. Let's Encrypt). Media stays DTLS-SRTP "
+            "encrypted end to end either way; this only affects who can pose as the relay.")
         ("use-mqtt", bpo::bool_switch(&args.use_mqtt)->default_value(args.use_mqtt),
             "Use MQTT to exchange sdp and ice candidates.")
         ("mqtt-host", bpo::value<std::string>(&args.mqtt_host)->default_value(args.mqtt_host),

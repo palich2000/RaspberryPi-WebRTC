@@ -195,8 +195,12 @@ struct Args {
     // for multi-camera single-active switching (see TWO_CAMERA_SWITCH_PLAN.md).
     // Default false keeps the standalone behavior unchanged.
     bool start_passive = false;
-    std::string stun_url = "stun:stun.l.google.com:19302";
+    // No default STUN server: a deployment names its own (--stun-url), so the
+    // camera never talks to a third-party service it was not configured for.
+    std::string stun_url = "";
     std::string turn_url = "";
+    // Skip certificate verification for turns: servers (see parser.cpp).
+    bool turn_tls_insecure = false;
     std::string turn_username = "";
     std::string turn_password = "";
 

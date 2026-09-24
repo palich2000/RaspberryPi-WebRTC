@@ -180,15 +180,23 @@ void Conductor::AddTracks(webrtc::scoped_refptr<webrtc::PeerConnectionInterface>
 
 webrtc::scoped_refptr<RtcPeer> Conductor::CreatePeerConnection(PeerConfig config) {
     config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
-    webrtc::PeerConnectionInterface::IceServer server;
-    server.uri = args.stun_url;
-    config.servers.push_back(server);
+    // An IceServer with an empty uri makes libwebrtc reject the whole
+    // configuration, so only add the ones that are actually set.
+    if (!args.stun_url.empty()) {
+        webrtc::PeerConnectionInterface::IceServer server;
+        server.uri = args.stun_url;
+        config.servers.push_back(server);
+    }
 
     if (!args.turn_url.empty()) {
         webrtc::PeerConnectionInterface::IceServer turn_server;
         turn_server.uri = args.turn_url;
         turn_server.username = args.turn_username;
         turn_server.password = args.turn_password;
+        if (args.turn_tls_insecure) {
+            turn_server.tls_cert_policy =
+                webrtc::PeerConnectionInterface::kTlsCertPolicyInsecureNoCheck;
+        }
         config.servers.push_back(turn_server);
     }
 

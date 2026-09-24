@@ -450,6 +450,10 @@ void WebsocketService::OnMessage(const std::string &req) {
         ice_server.urls = messageJson["urls"].get<std::vector<std::string>>();
         ice_server.username = messageJson["username"];
         ice_server.password = messageJson["credential"];
+        if (args_.turn_tls_insecure) {
+            ice_server.tls_cert_policy =
+                webrtc::PeerConnectionInterface::kTlsCertPolicyInsecureNoCheck;
+        }
         // Skip empty ICE servers: a server with no URLs makes libwebrtc reject the
         // whole RTCConfiguration ("Empty uri") and CreatePeer returns null. A LAN
         // SFU advertises no STUN/TURN, so the join carries an empty urls array.
