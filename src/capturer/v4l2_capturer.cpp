@@ -113,7 +113,20 @@ bool V4L2Capturer::Initialize() {
         return false; // recoverable: caller backs off and retries
     }
 
-    if (!V4L2Util::InitBuffer(fd_, &capture_, V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_MEMORY_MMAP)) {
+    // Multiplanar-only capture nodes (e.g. the i.MX8 ISI) reject the single-plane
+    // buffer type, so pick the type from what the node actually supports.
+    v4l2_buf_type capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    v4l2_capability cap = {};
+    if (V4L2Util::QueryCapabilities(fd_, &cap)) {
+        uint32_t caps =
+            (cap.capabilities & V4L2_CAP_DEVICE_CAPS) ? cap.device_caps : cap.capabilities;
+        if (!(caps & V4L2_CAP_VIDEO_CAPTURE) && (caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE)) {
+            capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            INFO_PRINT("%s is a multiplanar capture device", devicePath.c_str());
+        }
+    }
+
+    if (!V4L2Util::InitBuffer(fd_, &capture_, capture_type, V4L2_MEMORY_MMAP)) {
         ERROR_PRINT("Could not setup v4l2 capture buffer");
         CloseFd();
         return false;
@@ -314,13 +327,31 @@ void V4L2Capturer::CaptureImage() {
         return;
     }
 
+    v4l2_plane planes[VIDEO_MAX_PLANES] = {};
     v4l2_buffer buf = {};
     buf.type = capture_.type;
     buf.memory = capture_.memory;
+    const bool mplane = V4L2_TYPE_IS_MULTIPLANAR(buf.type);
+    if (mplane) {
+        buf.m.planes = planes;
+        buf.length = VIDEO_MAX_PLANES;
+    }
 
     if (!V4L2Util::DequeueBuffer(fd_, &buf)) {
         HandleCaptureFailure("dequeue buffer failed");
         return;
+    }
+
+    if (mplane) {
+        // Keep the plane array alive beyond this stack frame (V4L2Buffer copies
+        // buf into .inner) and expose the payload size where the rest of the
+        // pipeline expects it. Packed formats (YUYV/UYVY) use a single plane.
+        auto &slot = capture_.buffers[buf.index];
+        for (uint32_t i = 0; i < buf.length && i < VIDEO_MAX_PLANES; i++) {
+            slot.plane[i] = planes[i];
+        }
+        buf.m.planes = slot.plane;
+        buf.bytesused = planes[0].bytesused;
     }
 
     // Frame captured successfully - reset the consecutive failure counter.
